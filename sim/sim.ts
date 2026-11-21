@@ -9,6 +9,7 @@ import type { Hello, Observation, Vec2, ZoneObs } from "../mechfight.ts"
 import { assignOpponents, type Opponent } from "./opponents.ts"
 
 const ROOT = join(import.meta.dirname!, "..")
+const SIM_TREES = process.env.TREES === "1"
 export const HELLO: Hello = JSON.parse(gunzipSync(readFileSync(join(ROOT, "check/stream.jsonl.gz"))).toString().split("\n")[0])
 const C: any = HELLO.config
 const DT = 1 / C.match.tick_hz
@@ -37,7 +38,7 @@ export function loadMap() {
 
 const clone = (o: any) => JSON.parse(JSON.stringify(o))
 
-export type MatchOpts = { seed: number; mainFactory: (hello: Hello, world: World, nav: Nav) => { act(o: Observation): any }; verbose?: boolean; houseAll?: boolean; duel?: number; roster?: "mixed" | "practice"; strict?: boolean }
+export type MatchOpts = { seed: number; mainFactory: (hello: Hello, world: World, nav: Nav) => { act(o: Observation): any }; verbose?: boolean; houseAll?: boolean; duel?: number; roster?: "mixed" | "practice"; strict?: boolean; foeFactory?: (hello: Hello, world: World, nav: Nav) => { act(o: Observation): any } }
 
 export function runMatch(opts: MatchOpts) {
   const { world, nav } = loadMap()
@@ -184,6 +185,11 @@ export function runMatch(opts: MatchOpts) {
       if (Math.abs(wrap(yaw - a.aim[0])) > (C.vision.fov_deg * Math.PI) / 360) return false
     }
     const ez = a.pos[2] + a.ms.eye_height * scaleOf(a)
+    if (SIM_TREES) {
+      // real rule: LOS to center or top, each line must clear buildings AND trees (crowns attenuate, trunks block)
+      const line = (tz: number) => world.los(a.pos[0], a.pos[1], ez, bx, by, tz, 1.0) && world.treeClear(a.pos[0], a.pos[1], ez, bx, by, tz)
+      return line(bz + bh * 0.5) || line(bz + bh)
+    }
     return world.los(a.pos[0], a.pos[1], ez, bx, by, bz + bh * 0.5, 1.0) || world.los(a.pos[0], a.pos[1], ez, bx, by, bz + bh, 1.0)
   }
 
@@ -685,6 +691,8 @@ export function runMatch(opts: MatchOpts) {
     }
   }
 
+  let foeBot: { act(o: Observation): any } | null = null
+  let foeMech: Mech | null = null
   if (opts.duel !== undefined) {
     const foe = mechs.find((m) => m.house && m.tier === opts.duel)!
     for (const m of mechs) if (m.house && m !== foe) { m.alive = false; m.ai.placed = true; m.pos = [9999, 9999, 0] }
@@ -700,6 +708,18 @@ export function runMatch(opts: MatchOpts) {
     const kind = W[Math.floor(R() * 3)]
     foe.weapons[1] = { kind, cooldown: 0, ammo: ws[kind].mag ?? 0, reload: 0, charge: 0, charging: false }
     foe.ai.rank = 0
+    if (opts.foeFactory) {
+      // self-play: the foe is driven by a bot; both sides start with a random secondary
+      const fh: Hello = clone(HELLO)
+      fh.slot = foe.id
+      delete (fh as Partial<Hello>).seed
+      foeBot = opts.foeFactory(fh, world, nav)
+      const mk = W[Math.floor(R() * 3)]
+      main.weapons[1] = { kind: mk, cooldown: 0, ammo: main.ws[mk].mag ?? 0, reload: 0, charge: 0, charging: false }
+      main.events.push({ type: "took", id: -1, kind: mk, slot: 1 })
+      foe.events.push({ type: "took", id: -1, kind, slot: 1 })
+      foeMech = foe
+    }
   }
   // hunter ranks: weakest first
   if (opts.duel === undefined) {
@@ -722,13 +742,13 @@ export function runMatch(opts: MatchOpts) {
       }
       for (const m of mechs) {
         if (!m.alive) continue
-        if (m.house) houseThink(m)
+        if (m.house && m !== foeMech) houseThink(m)
         else {
           const ob = buildObs(m)
           const t0 = performance.now()
           let a: any = {}
-          try { a = bot.act(ob) ?? {} } catch (e) { if (opts.strict) throw e; if (opts.verbose) console.error(e); a = {} }
-          mainDecisionMs = Math.max(mainDecisionMs, performance.now() - t0)
+          try { a = (m === main ? bot : foeBot!).act(ob) ?? {} } catch (e) { if (opts.strict) throw e; if (opts.verbose) console.error(e); a = {} }
+          if (m === main) mainDecisionMs = Math.max(mainDecisionMs, performance.now() - t0)
           const c = m.ctrl
           c.move = a.move ?? [0, 0]; c.boost = !!a.boost; c.jump = !!a.jump; c.aim = a.aim ?? c.aim; c.fire = a.fire ?? [false, false]; c.reload = !!a.reload
           c.pick = a.pick; c.take = a.take; c.drop = a.drop
@@ -910,6 +930,7 @@ export function runMatch(opts: MatchOpts) {
     main.place = alive.indexOf(main) + 1
   }
   const houseDeaths = mechs.filter((m) => m.house && !m.alive).length
+  if (opts.duel !== undefined && foeMech) return { seed: opts.seed, win: main.alive && !foeMech.alive ? 1 : !main.alive && foeMech.alive ? 0 : 0.5, hp: main.alive ? main.hp / main.maxHp : 0, t, mainW: main.weapons[1]?.kind, foeW: foeMech.weapons[1]?.kind, mainHpLeft: main.hp | 0, foeHpLeft: foeMech.hp | 0 }
   if (opts.duel !== undefined) return { seed: opts.seed, win: main.alive ? 1 : 0, hp: main.alive ? main.hp / main.maxHp : 0, t, foe: mechs.find((m) => m.house && m.ai.rank === 0)?.weapons[1]?.kind }
   return { seed: opts.seed, slot: mainSlot, place: main.place, score: 16 - main.place, kills: main.kills, t: +t.toFixed(1), houseDeaths, cubes: main.cubes, maxMs: +mainDecisionMs.toFixed(1), st: ST, weapons: main.weapons.filter(Boolean).map((w) => w!.kind), opponents: roster?.map((o) => o.name), log }
 }

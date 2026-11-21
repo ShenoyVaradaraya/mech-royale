@@ -69,6 +69,21 @@ export const DEFAULT_P = {
   targetPriority: 1,
   armedGuard: 1,
   kitSearch: 2,
+  mrm: 0,
+  mrmMin: 2,
+  mrmNoLos: 3,
+  mrmRange: 1.5,
+  detail: 0,
+  retreatFix: 0,
+  standFight: 0, // max enemies within 120 m for which we stand and fight instead of fleeing a chaser
+  standEnergy: 25,
+  standR: 75,
+  ghost: 1, // survival mode: after ghostT never start fights, hide concealed in the next circle, move silently
+  ghostT: 70,
+  ghostQuiet: 70,
+  trees: 1, // model tree concealment in our own visibility checks (cover, hiding, MRM)
+  detailR: 140,
+  detailGap: 35,
 }
 export type Params = typeof DEFAULT_P
 
@@ -115,6 +130,10 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
   let lastTargetId = -1
   let dodging = -99
   let peekCover: number[] | null = null
+  let mrmPt: number[] | null = null
+  let mrmT = -99
+  let retreatJinkDir = 1
+  let retreatJinkUntil = -99
   let peekT = -99
   let peekTarget = -1
   let anchor: number[] | null = null
@@ -217,11 +236,11 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
     const [x, y, z] = obs.self.pos
     const [cx, cy] = obs.zone.next_center
     const radius = obs.zone.next_radius
-    const extent = Math.min(40, radius * 0.32)
+    const extent = P.ghost ? Math.min(120, radius * 0.55) : Math.min(40, radius * 0.32)
     let best: number[] | null = null
     let bestScore = Infinity
-    for (const fraction of [0, 0.45, 0.75, 1]) {
-      const steps = fraction === 0 ? 1 : 8
+    for (const fraction of P.ghost ? [0, 0.25, 0.5, 0.75, 1] : [0, 0.45, 0.75, 1]) {
+      const steps = fraction === 0 ? 1 : P.ghost ? 12 : 8
       for (let i = 0; i < steps; i++) {
         const angle = i * 2 * Math.PI / steps
         const px = cx + Math.cos(angle) * extent * fraction
@@ -230,7 +249,7 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
         if (cell < 0 || !nav.ok[cell]) continue
         const floor = nav.s[cell]
         if (floor > world.ground(px, py) + 2) continue
-        let score = Math.hypot(px - x, py - y) * 0.16 + extent * fraction * 0.6 + Math.abs(floor - z) * 0.3
+        let score = Math.hypot(px - x, py - y) * 0.16 + extent * fraction * (P.ghost ? 0.15 : 0.6) + Math.abs(floor - z) * 0.3
         for (const e of enemies) {
           const d = Math.hypot(px - e.pos[0], py - e.pos[1])
           if (d < 105 && visibleFrom(e.pos[0], e.pos[1], e.pos[2] + 8, px, py, floor, C.mech.height)) score += (105 - d) * 0.65
@@ -238,7 +257,11 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
         for (let step = 0; step < 8; step++) {
           const bearing = step * Math.PI / 4
           const ax = px + Math.cos(bearing) * 28, ay = py + Math.sin(bearing) * 28
-          if (world.los(ax, ay, world.ground(ax, ay) + 7, px, py, floor + 4.5, 1.5)) score += P.hideAtAnchor ? 5 : 2.2
+          if (world.los(ax, ay, world.ground(ax, ay) + 7, px, py, floor + 4.5, 1.5) && (!P.trees || world.treeClear(ax, ay, world.ground(ax, ay) + 8, px, py, floor + 4.5))) score += P.ghost ? 9 : P.hideAtAnchor ? 5 : 2.2
+          if (P.ghost) {
+            const fx = px + Math.cos(bearing) * 70, fy = py + Math.sin(bearing) * 70
+            if (world.los(fx, fy, world.ground(fx, fy) + 8, px, py, floor + 4.5, 2) && (!P.trees || world.treeClear(fx, fy, world.ground(fx, fy) + 8, px, py, floor + 4.5))) score += 4
+          }
         }
         if (score < bestScore) { bestScore = score; best = [px, py] }
       }
@@ -271,6 +294,11 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
   }
 
   function visibleFrom(ex: number, ey: number, ez: number, x: number, y: number, z: number, h: number) {
+    if (P.trees) {
+      // real vision: tree crowns/trunks hide us even with a clear building line
+      const line = (tz: number) => world.los(ex, ey, ez, x, y, tz, 1.5) && world.treeClear(ex, ey, ez, x, y, tz)
+      return line(z + h * 0.5) || line(z + h)
+    }
     return world.los(ex, ey, ez, x, y, z + h * 0.5, 1.5) || world.los(ex, ey, ez, x, y, z + h, 1.5)
   }
 
@@ -518,7 +546,9 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
         const goodOpening = P.battleRoyale && P.survival < 2 && hpF > 0.85 && !!W[1] && losOk && d < 85 &&
           (!e.weapons.includes("lightning") || d > C.weapons.lightning.range + 12) &&
           !visible.some((other) => other !== e && Math.hypot(other.pos[0] - e.pos[0], other.pos[1] - e.pos[1]) < 80)
-        const want = holdingCover ? hostile && losOk : hostile || weak || goodOpening || (P.aggressive && hpF > 0.8 && visible.length === 1)
+        const ghostNow = P.ghost && t > P.ghostT
+        const want = ghostNow ? (t - (attackedBy.get(e.id) ?? -99) < 4 || d < P.closeRange) && (losOk || d < 20)
+          : holdingCover ? hostile && losOk : hostile || weak || goodOpening || (P.aggressive && hpF > 0.8 && visible.length === 1)
         if (!want) continue
         let s = d / 40 + e.hp / 400 + (losOk ? 0 : 4) - (attackedBy.has(e.id) ? 1 : 0)
         if (P.targetPriority && useGuard) {
@@ -579,6 +609,12 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
       const finish = target && target.hp < P.finishHp && dist(target) < 120 && hpF > 0.15 &&
         (!P.survival || ttdMe > Math.max(1.5, ttkT * 2) && activeAttackers < 3)
       mode = shortRetreat || (healing || disengage) && !finish ? "retreat" : target ? "fight" : "loot"
+      // can't outrun a chaser that keeps hitting us: fleeing only gives it free shots, so fight back
+      if (P.standFight && mode === "retreat" && target && !finish && hpF > 0.12 && me.energy < P.standEnergy &&
+          t - lastDamagedT < 0.8 && dist(target) < P.standR && attackedBy.has(target.id) &&
+          visible.filter((e) => dist(e) < 120).length <= P.standFight &&
+          !(target.weapons.includes("lightning") && lightS < 0 && dist(target) < C.weapons.lightning.range + 5 && !cover))
+        mode = "fight"
       const npcAngry = [...npcAttack.values()].some((tt) => t - tt < 4)
       if (mode === "loot" && !npcAngry && t - lastDamagedT > 2 && hpF < P.restHp && inCircle([x, y], safeCircle(obs, 10), P.zoneMargin * 0.5)) mode = "rest"
       if (holdingCover && !npcAngry && (mode === "loot" || mode === "rest")) mode = "hide"
@@ -606,6 +642,7 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
       let lootCrate: Item | null = null
       let lootDrone: Track | null = null
       let staging = false
+      let quiet = false // walk below sound.step_speed so footsteps make no sound
 
       if (mode === "retreat") {
         const attackers = recoverEarly ? enemies.filter((e) => attackedBy.has(e.id) || seeingMe.includes(e) || e === target) : []
@@ -640,6 +677,25 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
         let ne: Track | null = null
         for (const e of threats) if (!ne || dist(e) < dist(ne)) ne = e
         if (ne) wantFace = Math.atan2(ne.pos[1] - y, ne.pos[0] - x)
+        if (P.retreatFix) {
+          const hurtNow = t - lastDamagedT < 0.45
+          // cover that still lets us get hit is not cover: re-search against everyone in view
+          if (hurtNow && Math.hypot(mv[0], mv[1]) < 0.1) {
+            cover = findCover(obs, visible.length ? visible : threats, x, y, z, myH, P.coverSearch)
+            coverT = t
+            if (cover && Math.hypot(cover[0] - x, cover[1] - y) > 1.5) mv = goTo(obs, cover[0], cover[1], x, y, z)
+          }
+          // never flee in a straight line while exposed: jink sideways so lead aim misses
+          if ((hurtNow || seeingMe.length) && ne) {
+            if (t > retreatJinkUntil) { retreatJinkDir = R() < 0.5 ? -1 : 1; retreatJinkUntil = t + P.strafeMin + R() * (P.strafeMax - P.strafeMin) }
+            const ml = Math.hypot(mv[0], mv[1])
+            const toE = Math.atan2(ne.pos[1] - y, ne.pos[0] - x)
+            const px = Math.cos(toE + Math.PI / 2 * retreatJinkDir), py = Math.sin(toE + Math.PI / 2 * retreatJinkDir)
+            if (ml < 0.1) mv = [px, py]
+            else mv = [mv[0] / ml + px * P.retreatFix, mv[1] / ml + py * P.retreatFix]
+            mv = steer(x, y, z, mv[0], mv[1])
+          }
+        }
       } else if (mode === "rotate" && target) {
         const away = Math.atan2(y - target.pos[1], x - target.pos[0])
         const d = dist(target)
@@ -695,6 +751,53 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
         if (P.thirdRepel) for (const e of bystanders) {
           const dd = Math.hypot(e.pos[0] - x, e.pos[1] - y)
           if (dd < 90 && dd > 1) { const w = ((90 - dd) / 90) * 2 * P.thirdRepel; mv[0] += ((x - e.pos[0]) / dd) * w; mv[1] += ((y - e.pos[1]) / dd) * w }
+        }
+        // Defeat in detail (Lanchester square law): when several enemies would arrive together,
+        // back away from their centroid while firing so they string out, then fight the leader alone.
+        if (P.detail && !escapingArc) {
+          const near = visible.filter((e) => dist(e) < P.detailR)
+          if (near.length >= 2) {
+            const ds = near.map(dist).sort((a, b) => a - b)
+            if (ds[1] - ds[0] < P.detailGap) {
+              let cx = 0, cy = 0
+              for (const e of near) { cx += e.pos[0]; cy += e.pos[1] }
+              cx /= near.length; cy /= near.length
+              const dc = Math.max(1, Math.hypot(x - cx, y - cy))
+              mv[0] += (x - cx) / dc * P.detail
+              mv[1] += (y - cy) / dc * P.detail
+            }
+          }
+        }
+        // Minimum Risk Movement (RoboWiki melee): with several threats, pick the reachable spot
+        // that keeps LOS on our target while minimizing exposure to everyone else.
+        if (P.mrm) {
+          const threats = visible.filter((e) => dist(e) < 160)
+          if (threats.length >= P.mrmMin && !escapingArc) {
+            if (!mrmPt || t - mrmT > 0.3 || Math.hypot(mrmPt[0] - x, mrmPt[1] - y) < 2) {
+              let best: number[] | null = null, br = Infinity
+              for (const rad of [6, 12]) for (let i = 0; i < 12; i++) {
+                const a = (i / 12) * Math.PI * 2 + (rad === 12 ? Math.PI / 12 : 0)
+                const px = x + Math.cos(a) * rad, py = y + Math.sin(a) * rad
+                const k = nav.cell(px, py)
+                if (k < 0 || !nav.ok[k] || Math.abs(nav.s[k] - z) > 1.6) continue
+                if (!inCircle([px, py], sc, P.zoneMargin * 0.5)) continue
+                const pz = nav.s[k]
+                let risk = 0
+                for (const e of threats) {
+                  const de = Math.max(20, Math.hypot(e.pos[0] - px, e.pos[1] - py))
+                  const seen = visibleFrom(e.pos[0], e.pos[1], e.pos[2] + 8, px, py, pz, myH)
+                  risk += (dpsOf(e.weapons, de, e.cubes) + 40) * (seen ? 1 : 0.15) * 4000 / (de * de)
+                }
+                const dt2 = Math.hypot(target.pos[0] - px, target.pos[1] - py)
+                const canShoot = world.los(px, py, pz + (muzZ - z), target.pos[0], target.pos[1], target.pos[2] + 4.5, 1.5)
+                risk += canShoot ? 0 : P.mrmNoLos
+                risk += P.mrmRange * ((dt2 - pref) / Math.max(20, pref)) ** 2
+                if (risk < br) { br = risk; best = [px, py] }
+              }
+              mrmPt = best; mrmT = t
+            }
+            if (mrmPt) mv = [mrmPt[0] - x, mrmPt[1] - y]
+          } else mrmPt = null
         }
         // if far and no LOS, path to it
         const losT = world.los(x, y, muzZ, target.pos[0], target.pos[1], target.pos[2] + 4.5, 1.0)
@@ -809,7 +912,8 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
           if (laser) { goal = laser.pos; lootCrate = null; lootDrone = null }
         }
         const travelingToLoot = goal !== null
-        if (P.zoneAnchor && goal === null && obs.zone.next_radius > 0 && obs.zone.next_radius <= (P.zoneAnchor > 1 ? 380 : 140)) {
+        if (P.ghost && t > P.ghostT && !lookingForLaser) { goal = null; lootCrate = null; lootDrone = null }
+        if (P.zoneAnchor && goal === null && obs.zone.next_radius > 0 && obs.zone.next_radius <= (P.zoneAnchor > 1 || P.ghost && t > P.ghostT ? 380 : 140)) {
           const threatenedAnchor = anchor && enemies.some((e) => Math.hypot(e.pos[0] - anchor![0], e.pos[1] - anchor![1]) < 55)
           if (obs.zone.shrink_end !== anchorPhase || t - anchorCheckedAt > (threatenedAnchor ? 3 : 12)) {
             anchor = findZoneAnchor(obs, enemies)
@@ -870,6 +974,10 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
           }
         }
         boost = !inCircle([x, y], gc, 0) && me.energy > 20
+        if (P.ghost && t > P.ghostT && me.in_zone && enemies.some((e) => dist(e) < P.ghostQuiet)) {
+          quiet = true
+          boost = false
+        }
         if (P.battleRoyale && travelingToLoot && goal && !haveSecond && me.energy > 65 && Math.hypot(goal[0] - x, goal[1] - y) > 12) boost = true
         if (staging && anchor && me.grounded && !recentlyHurt && !npcAngry && seeingMe.length === 0 &&
             Math.hypot(anchor[0] - x, anchor[1] - y) < 3 && me.in_zone && inCircle([x, y], safeCircle(obs, 8), 5)) {
@@ -1137,7 +1245,8 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
 
       const ml = Math.hypot(mv[0], mv[1])
       const movementScale = headingToFinal && finalDistance < 3 ? Math.min(1, finalDistance / 2.5) : 1
-      act.move = ml > 1e-6 ? [mv[0] / ml * movementScale, mv[1] / ml * movementScale] : [0, 0]
+      const quietScale = quiet && mode !== "fight" && mode !== "retreat" && mode !== "zone" ? Math.min(1, (C.sound.step_speed * 0.9) / (me.stats.walk_speed ?? C.mech.walk_speed)) : 1
+      act.move = ml > 1e-6 ? [mv[0] / ml * movementScale * quietScale, mv[1] / ml * movementScale * quietScale] : [0, 0]
       act.boost = boost
       act.jump = jump
       act.aim = [wrap(aimYaw), Math.max(C.mech.min_pitch, Math.min(C.mech.max_pitch, aimPitch))]

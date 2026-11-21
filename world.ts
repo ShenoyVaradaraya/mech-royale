@@ -84,6 +84,8 @@ export class World {
       this.surf[k] = s
       this.maxTop[k] = mt
     }
+    if (w.rules?.canopyDensity != null) this.canopyDensity = w.rules.canopyDensity
+    if (w.rules?.canopyBlockT != null) this.canopyBlockT = w.rules.canopyBlockT
     const tr = w.trees
     if (tr && tr.fields && tr.data) {
       const f = tr.fields as string[]
@@ -186,6 +188,86 @@ export class World {
       if (k < 0) return false
       if (z > this.maxTop[k] + 0.01 && z > this.gc[k] + 3) continue
       if (this.solid(x, y, z)) return false
+    }
+    return true
+  }
+
+  // ---- tree vision (protocol §8 + track viewer): trunks block sight, crowns attenuate it.
+  // transmittance = exp(-canopyDensity * metres of crown crossed); visible if >= canopyBlockT. Shots ignore trees.
+  canopyDensity = 0.35
+  canopyBlockT = 0.25
+  private treeGrid: Int32Array[] | null = null
+  private treeStamp: Uint32Array | null = null
+  private stampN = 0
+  private tg = { minX: 0, minY: 0, nx: 0, ny: 0, cs: 8 }
+  private tc: Float64Array | null = null // per tree: cx, cy, cz, cr, rz, x, y, z0, top, tr
+
+  private buildTreeGrid() {
+    const n = this.trees.length, cs = this.tg.cs
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+    const tc = new Float64Array(n * 10)
+    for (let i = 0; i < n; i++) {
+      const t = this.trees[i]
+      const cz = t.z + (t.cb + t.h) / 2, rz = Math.max((t.h - t.cb) / 2, 0.5), top = t.z + Math.max(t.cb + 0.5 * (t.h - t.cb), 3)
+      tc.set([t.cx, t.cy, cz, t.cr, rz, t.x, t.y, t.z - 1, top, t.tr], i * 10)
+      minX = Math.min(minX, t.cx - t.cr, t.x - t.tr); minY = Math.min(minY, t.cy - t.cr, t.y - t.tr)
+      maxX = Math.max(maxX, t.cx + t.cr, t.x + t.tr); maxY = Math.max(maxY, t.cy + t.cr, t.y + t.tr)
+    }
+    const nx = Math.max(1, Math.ceil((maxX - minX) / cs) + 1), ny = Math.max(1, Math.ceil((maxY - minY) / cs) + 1)
+    const cells: number[][] = Array.from({ length: nx * ny }, () => [])
+    for (let i = 0; i < n; i++) {
+      const t = this.trees[i]
+      const x0 = Math.floor((Math.min(t.cx - t.cr, t.x - t.tr) - minX) / cs), x1 = Math.floor((Math.max(t.cx + t.cr, t.x + t.tr) - minX) / cs)
+      const y0 = Math.floor((Math.min(t.cy - t.cr, t.y - t.tr) - minY) / cs), y1 = Math.floor((Math.max(t.cy + t.cr, t.y + t.tr) - minY) / cs)
+      for (let gy = y0; gy <= y1; gy++) for (let gx = x0; gx <= x1; gx++) cells[gy * nx + gx].push(i)
+    }
+    this.tg = { minX, minY, nx, ny, cs }
+    this.treeGrid = cells.map((c) => Int32Array.from(c))
+    this.treeStamp = new Uint32Array(n)
+    this.tc = tc
+  }
+
+  /** true if trees do not block sight along a->b (buildings not checked: combine with los()). */
+  treeClear(ax: number, ay: number, az: number, bx: number, by: number, bz: number): boolean {
+    if (!this.trees.length) return true
+    if (!this.treeGrid) this.buildTreeGrid()
+    const { minX, minY, nx, ny, cs } = this.tg
+    const tc = this.tc!, stamp = this.treeStamp!, grid = this.treeGrid!
+    const s = ++this.stampN
+    const dx = bx - ax, dy = by - ay, dz = bz - az, L = Math.sqrt(dx * dx + dy * dy + dz * dz)
+    const maxCrown = Math.log(1 / this.canopyBlockT) / this.canopyDensity
+    let crown = 0
+    const steps = Math.max(1, Math.ceil(Math.hypot(dx, dy) / (cs * 0.5)))
+    for (let k = 0; k <= steps; k++) {
+      const f = k / steps
+      const gx = Math.floor((ax + dx * f - minX) / cs), gy = Math.floor((ay + dy * f - minY) / cs)
+      for (let oy = -1; oy <= 1; oy++) for (let ox = -1; ox <= 1; ox++) {
+        const cx = gx + ox, cy = gy + oy
+        if (cx < 0 || cy < 0 || cx >= nx || cy >= ny) continue
+        const cell = cy * nx + cx
+        const list = grid[cell]
+        for (let j = 0; j < list.length; j++) {
+          const i = list[j]
+          if (stamp[i] === s) continue
+          stamp[i] = s
+          const o = i * 10
+          // trunk: vertical cylinder
+          const tx = tc[o + 5] - ax, ty = tc[o + 6] - ay, d2 = dx * dx + dy * dy
+          const ft = d2 > 0 ? Math.max(0, Math.min(1, (tx * dx + ty * dy) / d2)) : 0
+          const qx = dx * ft - tx, qy = dy * ft - ty, tr = tc[o + 9]
+          if (qx * qx + qy * qy < tr * tr) { const zz = az + dz * ft; if (zz > tc[o + 7] && zz < tc[o + 8]) return false }
+          // crown: ellipsoid
+          const cr = tc[o + 3], rz = tc[o + 4]
+          const sx = (ax - tc[o]) / cr, sy = (ay - tc[o + 1]) / cr, sz = (az - tc[o + 2]) / rz
+          const ux = dx / cr, uy = dy / cr, uz = dz / rz
+          const A = ux * ux + uy * uy + uz * uz, B = 2 * (sx * ux + sy * uy + sz * uz), Cc = sx * sx + sy * sy + sz * sz - 1
+          const disc = B * B - 4 * A * Cc
+          if (disc > 0 && A > 0) {
+            const q = Math.sqrt(disc), t0 = Math.max(0, (-B - q) / (2 * A)), t1 = Math.min(1, (-B + q) / (2 * A))
+            if (t1 > t0) { crown += (t1 - t0) * L; if (crown > maxCrown) return false }
+          }
+        }
+      }
     }
     return true
   }
