@@ -1,0 +1,8 @@
+{
+  "type": "module",
+  "scripts": {
+    "check": "python3 check/check.py -- node main.ts",
+    "benchmark": "node sim/benchmark.ts",
+    "verify": "node sim/verify.ts"
+  }
+}
