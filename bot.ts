@@ -61,6 +61,7 @@ export const DEFAULT_P = {
   rotationTime: 0,
   rangeControl: 0,
   zoneAnchor: 1,
+  hideAtAnchor: 1,
 }
 export type Params = typeof DEFAULT_P
 
@@ -170,7 +171,7 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
         for (let step = 0; step < 8; step++) {
           const bearing = step * Math.PI / 4
           const ax = px + Math.cos(bearing) * 28, ay = py + Math.sin(bearing) * 28
-          if (world.los(ax, ay, world.ground(ax, ay) + 7, px, py, floor + 4.5, 1.5)) score += 2.2
+          if (world.los(ax, ay, world.ground(ax, ay) + 7, px, py, floor + 4.5, 1.5)) score += P.hideAtAnchor ? 5 : 2.2
         }
         if (score < bestScore) { bestScore = score; best = [px, py] }
       }
@@ -414,6 +415,9 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
       const visible = enemies.filter((e) => e.vis)
       const dist = (e: { pos: number[] }) => Math.hypot(e.pos[0] - x, e.pos[1] - y, e.pos[2] - z)
       const seeingMe = visible.filter((e) => dist(e) < 130 && visibleFrom(e.pos[0], e.pos[1], e.pos[2] + 8, x, y, z, myH))
+      const holdingCover = P.hideAtAnchor && mode === "hide" && anchor && me.in_zone && me.grounded &&
+        obs.zone.shrink_end === anchorPhase && Math.hypot(anchor[0] - x, anchor[1] - y) < 4 &&
+        t - lastDamagedT > 1.5 && seeingMe.length === 0 && inCircle([x, y], safeCircle(obs, 8), 5)
 
       // ---- choose target (selective: attackers, approaching/aiming enemies, weak ones)
       const attackedBy = new Map<number, number>()
@@ -440,7 +444,7 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
         const goodOpening = P.battleRoyale && P.survival < 2 && hpF > 0.85 && !!W[1] && losOk && d < 85 &&
           (!e.weapons.includes("lightning") || d > C.weapons.lightning.range + 12) &&
           !visible.some((other) => other !== e && Math.hypot(other.pos[0] - e.pos[0], other.pos[1] - e.pos[1]) < 80)
-        const want = hostile || weak || goodOpening || (P.aggressive && hpF > 0.8 && visible.length === 1)
+        const want = holdingCover ? hostile && losOk : hostile || weak || goodOpening || (P.aggressive && hpF > 0.8 && visible.length === 1)
         if (!want) continue
         let s = d / 40 + e.hp / 400 + (losOk ? 0 : 4) - (attackedBy.has(e.id) ? 1 : 0)
         if (e.id === lastTargetId) s -= 0.7
@@ -490,6 +494,7 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
       mode = (healing || disengage) && !finish ? "retreat" : target ? "fight" : "loot"
       const npcAngry = [...npcAttack.values()].some((tt) => t - tt < 4)
       if (mode === "loot" && !npcAngry && t - lastDamagedT > 2 && hpF < P.restHp && inCircle([x, y], safeCircle(obs, 10), P.zoneMargin * 0.5)) mode = "rest"
+      if (holdingCover && !npcAngry && (mode === "loot" || mode === "rest")) mode = "hide"
       if (!me.in_zone && obs.zone.dps * 3 > me.hp * 0.5) mode = "zone"
       if (P.safePlay) {
         const next = safeCircle(obs, 6)
@@ -513,6 +518,7 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
       let wantFace: number | null = null
       let lootCrate: Item | null = null
       let lootDrone: Track | null = null
+      let staging = false
 
       if (mode === "retreat") {
         const threats = enemies
@@ -662,7 +668,7 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
         const g = headingToFinal ? obs.zone.next_center : clampToCircle([x, y], gc, P.safePlay ? Math.min(P.zoneMargin, gc.r * 0.3) : P.zoneMargin)
         mv = goTo(obs, g[0], g[1], x, y, z)
         boost = me.energy > 10 && (!headingToFinal || finalDistance > 10)
-      } else {
+      } else if (mode === "loot") {
         // loot / explore
         let goal: number[] | null = null
         let gscore = Infinity
@@ -711,6 +717,7 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
             anchorCheckedAt = t
           }
           goal = anchor
+          staging = !!(P.hideAtAnchor && anchor)
         }
         if (goal === null) {
           // wander inside goal circle, away from known enemies
@@ -761,8 +768,14 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
         }
         boost = !inCircle([x, y], gc, 0) && me.energy > 20
         if (P.battleRoyale && travelingToLoot && goal && !haveSecond && me.energy > 65 && Math.hypot(goal[0] - x, goal[1] - y) > 12) boost = true
+        if (staging && anchor && me.grounded && !recentlyHurt && !npcAngry && seeingMe.length === 0 &&
+            Math.hypot(anchor[0] - x, anchor[1] - y) < 3 && me.in_zone && inCircle([x, y], safeCircle(obs, 8), 5)) {
+          mode = "hide"
+          mv = [0, 0]
+          boost = false
+        }
         // supply drop
-        if (P.dropGrab && !P.supplyPriority) {
+        if (P.dropGrab && !P.supplyPriority && mode === "loot") {
           for (const dr of obs.drops) {
             const dd = Math.hypot(dr.pos[0] - x, dr.pos[1] - y)
             if (dd < P.dropRange && dr.lands_in < dd / 11 + 3 && (dr.holder === null || dr.holder === me_id)) {
@@ -797,7 +810,7 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
         }
       }
 
-      if (P.supplyPriority && P.dropGrab && mode !== "zone" && (mode !== "fight" || hpF < 0.75 || seeingMe.length === 0)) {
+      if (P.supplyPriority && P.dropGrab && mode !== "zone" && mode !== "hide" && (mode !== "fight" || hpF < 0.75 || seeingMe.length === 0)) {
         let bestDrop: (typeof obs.drops)[number] | null = null
         let bestTime = Infinity
         for (const drop of obs.drops) {
@@ -936,7 +949,7 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
       } else {
         // not fighting: shoot crates / npcs if cheap, else scan
         let shot = false
-        if (mode === "loot" && gunS >= 0 && !(P.prepare > 1 && t < 2.3)) {
+        if (mode === "loot" && !staging && gunS >= 0 && !(P.prepare > 1 && t < 2.3)) {
           let best: { pos: number[]; h: number } | null = lootCrate ? { pos: (lootCrate as Item).pos, h: 1.2 } : null
           let bd = lootCrate ? dist(lootCrate) : Infinity
           for (const c of crates.values()) {

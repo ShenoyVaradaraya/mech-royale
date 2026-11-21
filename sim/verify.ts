@@ -57,4 +57,29 @@ nearby.self.pos[0] += 11
 const arrival = rotate.act(nearby)
 assert.ok(arrival.move![0] > 0 && arrival.move![0] < 0.5)
 assert.equal(arrival.boost, false)
-console.log(`PASS · ${observations.length} seed-independent actions · 16 opponent profiles · final circle rotation and braking`)
+
+const staging = structuredClone(finalZone)
+staging.zone.next_center = [x, y]
+staging.zone.next_radius = 1
+staging.self.hp = staging.self.max_hp
+staging.crates = [{ id: 1000, pos: [x + 10, y, world.ground(x + 10, y)] }]
+const hide = makeBot(hello, world, nav)
+const held = hide.act(staging)
+assert.equal(hide.debugMode(), "hide")
+assert.deepEqual(held.move, [0, 0])
+assert.deepEqual(held.fire, [false, false])
+assert.equal(held.boost, false)
+
+staging.t += 0.1
+staging.pickups = [{ id: 8000, kind: "laser", pos: [x + 10, y, world.ground(x + 10, y)] }]
+assert.deepEqual(hide.act(staging).move, [0, 0])
+assert.equal(hide.debugMode(), "hide")
+
+staging.t += 0.1
+const attackerId = (hello.slot + 1) % 16
+staging.mechs = [{ id: attackerId, kind: "mech", pos: [x + 10, y, world.ground(x + 10, y)], vel: [0, 0, 0], aim: [Math.PI, 0], weapons: ["gun"] }]
+staging.events = [{ type: "damaged", amount: 45, weapon: "gun", bearing: 0, by: attackerId }]
+hide.act(staging)
+assert.ok(["fight", "retreat"].includes(hide.debugMode()))
+
+console.log(`PASS · ${observations.length} seed-independent actions · 16 profiles · final rotation · quiet cover and reaction to damage`)

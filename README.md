@@ -20,7 +20,7 @@ Each match scores `16 - place`, with shared placement for same-tick deaths. The 
 
 The game announces the current circle and the next circle. Each new circle fits inside the preceding circle. The zone-staging variants use covered positions near the next circle’s center as a hedge against later shifts. Once the zero-radius circle is announced, they budget travel time to its center and slow down on arrival.
 
-Late staging is enabled in the main bot. It adds a covered staging destination when the next radius is at most 140 m and higher-priority loot and threats are clear. In the 100-match test it scored roughly the same as ordinary rotation. Staging from the first circle scored substantially lower.
+The main bot stages when the next radius is at most 140 m and higher-priority loot and threats are clear. It favors positions screened by terrain, stays quiet while approaching, and holds cover once it arrives. Damage, nearby threats with line of sight, and a changing circle can send it back into combat or toward a new zone. Staging from the first circle scored substantially lower in the earlier test.
 
 ## Evaluation results
 
@@ -28,7 +28,8 @@ All variants played the same 100 local seeds (`501–600`) with the practice ros
 
 | Variant | Mean placement points | Wins | Deaths before 60 s |
 | --- | ---: | ---: | ---: |
-| **Late zone staging (main bot)** | **6.12** | 2 | 17 |
+| **Late zone staging and hiding (main bot)** | **6.12** | 2 | 17 |
+| Late zone staging | 6.12 | 2 | 17 |
 | Ordinary rotation | 6.10 | 2 | 17 |
 | Closer spacing | 5.75 | 0 | 20 |
 | Energy conservation | 5.69 | 1 | 22 |
