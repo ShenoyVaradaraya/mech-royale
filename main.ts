@@ -1,7 +1,7 @@
 import { run, log } from "./mechfight.ts"
 import { World } from "./world.ts"
 import { Nav } from "./nav.ts"
-import { makeBot } from "./bot.ts"
+import { ENTRY_PARAMS, makeBot } from "./bot.ts"
 import { existsSync } from "node:fs"
 import { join } from "node:path"
 
@@ -17,5 +17,5 @@ run((hello) => {
     for (let k = 0; k < 300; k++) world.los(-300 + k, -50, 5, 200 - k, 80, 8, 1)
   }
   log(`map loaded + warmed in ${(performance.now() - t0).toFixed(0)} ms`)
-  return makeBot(hello, world, nav)
+  return makeBot(hello, world, nav, ENTRY_PARAMS)
 })

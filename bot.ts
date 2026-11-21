@@ -69,8 +69,20 @@ export const DEFAULT_P = {
   targetPriority: 1,
   armedGuard: 1,
   kitSearch: 2,
+  timingAim: 0,
+  laserStandoff: 0,
+  tacticalMove: 0,
+  openingEvade: 0,
 }
 export type Params = typeof DEFAULT_P
+
+export const ENTRY_PARAMS = {
+  fightRange: 155,
+  rangeControl: 1,
+  peekR: 22,
+  timingAim: 1,
+  aimLead: 1,
+} satisfies Partial<Params>
 
 type Track = { id: number; pos: number[]; vel: number[]; aim: number[]; hp: number; maxHp: number; weapons: string[]; charging: boolean; seen: number; vis: boolean; cubes: number }
 type Item = { id: number; pos: number[]; kind?: string; hp?: number; seen: number }
@@ -120,6 +132,9 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
   let anchor: number[] | null = null
   let anchorPhase = -1
   let anchorCheckedAt = -99
+  let tacticalHeading = 0
+  let tacticalUntil = -99
+  let tacticalTarget = -1
   const surveyed = new Set<string>()
   let surveyCheckedAt = -99
   const guardReady = (obs: Observation) => !P.armedGuard || !!obs.self.weapons[1]
@@ -384,6 +399,95 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
     return best
   }
 
+  function shotSolution(obs: Observation, target: Track, movement: number[], boosting: boolean, gunDelay: number, gunSpeed: number, charging: boolean) {
+    const me = obs.self
+    const frame = 1 / C.match.tick_hz
+    const targetScale = 1 + Number(C.cubes.size_per_cube) * target.cubes
+    const targetHeight = C.mech.height * targetScale
+    const targetRadius = C.mech.radius * targetScale
+    const muzzleHeight = me.stats.muzzle_height ?? C.mech.muzzle_height
+    const moveLength = Math.max(1, Math.hypot(movement[0], movement[1]))
+    const speed = (boosting && me.grounded ? me.stats.boost_speed ?? C.mech.boost_speed : me.stats.walk_speed ?? C.mech.walk_speed) *
+      (charging ? me.stats.charge_move_mult ?? C.mech.charge_move_mult : 1)
+    const accel = me.grounded ? me.stats.ground_accel ?? C.mech.ground_accel : me.stats.air_accel ?? C.mech.air_accel
+    const moveX = movement[0] * speed / moveLength, moveY = movement[1] * speed / moveLength
+    return (laser: boolean) => {
+      const delay = laser ? frame : gunDelay
+      let [ox, oy, oz] = me.pos
+      let [vx, vy, vz] = me.vel
+      for (let elapsed = 0; elapsed + frame * 0.5 < delay; elapsed += frame) {
+        const dx = moveX - vx, dy = moveY - vy
+        const share = Math.min(1, accel * frame / Math.max(1e-6, Math.hypot(dx, dy)))
+        vx += dx * share
+        vy += dy * share
+        if (!me.grounded) vz -= C.mech.gravity * frame
+        ox += vx * frame
+        oy += vy * frame
+        oz += vz * frame
+      }
+      oz += muzzleHeight
+      const v = target.vel
+      const pv = [v[0] * (laser ? 1 : P.aimLead), v[1] * (laser ? 1 : P.aimLead), v[2] * 0.5]
+      const point = [target.pos[0] + v[0] * frame, target.pos[1] + v[1] * frame, target.pos[2] + targetHeight / 2 + pv[2] * frame]
+      const flight = laser ? 0 : intercept([ox, oy, oz], point, pv, gunSpeed) ?? 0
+      const approach = laser ? 0 : Math.max(0, delay - frame + flight - frame * 0.5)
+      for (let i = 0; i < 3; i++) point[i] += pv[i] * approach
+      const dx = point[0] - ox, dy = point[1] - oy, dz = point[2] - oz
+      const range = Math.hypot(dx, dy)
+      const yaw = Math.atan2(dy, dx)
+      const pitch = Math.atan2(dz, range)
+      const yawDelta = Math.abs(wrap(yaw - me.aim[0]))
+      const pitchDelta = Math.abs(pitch - me.aim[1])
+      const yawError = Math.max(0, yawDelta - delay * (me.stats.turn_rate ?? C.mech.turn_rate))
+      const pitchError = Math.max(0, pitchDelta - delay * (me.stats.pitch_rate ?? C.mech.pitch_rate))
+      const aligned = yawError * range < targetRadius * 0.63 && pitchError * range < targetHeight * 0.28 &&
+        pitch >= C.mech.min_pitch && pitch <= C.mech.max_pitch
+      return { yaw, pitch, range: Math.hypot(range, dz), clear: aligned && world.los(ox, oy, oz, point[0], point[1], point[2], 0.7) }
+    }
+  }
+
+  function combatHeading(obs: Observation, target: Track, threats: Track[], movement: number[], preferredRange: number, canFire: boolean, height: number, muzzle: number) {
+    const [x, y, z] = obs.self.pos
+    const goal = Math.atan2(movement[1], movement[0])
+    const length = Math.hypot(movement[0], movement[1])
+    if (length < 0.1) return movement
+    if (tacticalTarget === target.id && obs.t < tacticalUntil) {
+      const dx = Math.cos(tacticalHeading), dy = Math.sin(tacticalHeading)
+      return nav.walkable(x, y, x + dx * 4, y + dy * 4) ? [dx, dy] : movement
+    }
+    const circle = safeCircle(obs, 2)
+    const mainTargetX = target.pos[0] + target.vel[0] * 0.45
+    const mainTargetY = target.pos[1] + target.vel[1] * 0.45
+    let bestHeading = goal
+    let bestValue = -Infinity
+    for (const offset of [0, -0.45, 0.45, -0.9, 0.9, -1.4, 1.4, Math.PI]) {
+      const heading = goal + offset
+      const dx = Math.cos(heading), dy = Math.sin(heading)
+      const px = x + dx * 11, py = y + dy * 11
+      const cell = nav.cell(px, py)
+      if (cell < 0 || !nav.ok[cell] || !inCircle([px, py], circle, 3) || !nav.walkable(x, y, px, py)) continue
+      const pz = nav.s[cell]
+      const mainRange = Math.hypot(px - mainTargetX, py - mainTargetY)
+      const line = world.los(px, py, pz + muzzle, mainTargetX, mainTargetY, target.pos[2] + C.mech.height * 0.5, 1)
+      let value = Math.cos(offset) * 2 + (dx * obs.self.vel[0] + dy * obs.self.vel[1]) * 0.065 - Math.abs(mainRange - preferredRange) / 30
+      if (line && canFire) value += 2.5
+      for (const foe of threats) {
+        const ex = foe.pos[0] + foe.vel[0] * 0.45, ey = foe.pos[1] + foe.vel[1] * 0.45
+        const distance = Math.hypot(ex - px, ey - py)
+        if (distance > 195 || !visibleFrom(ex, ey, foe.pos[2] + 8, px, py, pz, height)) continue
+        const mainFoe = foe === target
+        value -= mainFoe && canFire ? 0.75 : 1.8
+        if (foe.weapons.includes("lightning") && distance < C.weapons.lightning.range + 9) value -= 4
+        if (foe.charging) value -= 1.4
+      }
+      if (value > bestValue) { bestValue = value; bestHeading = heading }
+    }
+    tacticalTarget = target.id
+    tacticalUntil = obs.t + 0.35
+    tacticalHeading = bestHeading
+    return [Math.cos(bestHeading), Math.sin(bestHeading)]
+  }
+
   function pickUpgrade(obs: Observation): number {
     const ch = obs.offer!.choices
     const preferred = P.upgradePlan && guardReady(obs) ? SUSTAIN_UPGRADES : UPG_PRI
@@ -518,7 +622,11 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
         const goodOpening = P.battleRoyale && P.survival < 2 && hpF > 0.85 && !!W[1] && losOk && d < 85 &&
           (!e.weapons.includes("lightning") || d > C.weapons.lightning.range + 12) &&
           !visible.some((other) => other !== e && Math.hypot(other.pos[0] - e.pos[0], other.pos[1] - e.pos[1]) < 80)
-        const want = holdingCover ? hostile && losOk : hostile || weak || goodOpening || (P.aggressive && hpF > 0.8 && visible.length === 1)
+        const rangedOpening = P.laserStandoff > 1 && laserS >= 0 && hpF > 0.76 && losOk && d < 175 &&
+          d >= (e.weapons.includes("lightning") ? C.weapons.lightning.range + 20 : 50) &&
+          (e.weapons.includes("mortar") || e.hp < e.maxHp * 0.65 || facing && approaching) &&
+          !visible.some((other) => other !== e && dist(other) < 100 && seeingMe.includes(other))
+        const want = holdingCover ? hostile && losOk : hostile || weak || goodOpening || rangedOpening || (P.aggressive && hpF > 0.8 && visible.length === 1)
         if (!want) continue
         let s = d / 40 + e.hp / 400 + (losOk ? 0 : 4) - (attackedBy.has(e.id) ? 1 : 0)
         if (P.targetPriority && useGuard) {
@@ -590,6 +698,16 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
       }
       if (P.rotationTime > t && mode === "fight" && target && dist(target) < 120 &&
           !(target.hp < 200 && ttdMe > 3) && hpF > 0.3 && inCircle([x, y], safeCircle(obs, 6), 5)) mode = "rotate"
+      const openingThreat = P.openingEvade && !W[1] && t < 65 && me.in_zone && mode !== "zone" &&
+        !(finish && winning) ? seeingMe.find((e) => {
+          const distance = dist(e)
+          const approach = ((x - e.pos[0]) * e.vel[0] + (y - e.pos[1]) * e.vel[1]) / Math.max(1, distance)
+          const hasSecondary = e.weapons.some((weapon) => weapon !== "gun")
+          const arcThreat = e.weapons.includes("lightning") && distance < C.weapons.lightning.range + 20
+          return arcThreat || hasSecondary && distance < 105 && approach > 2.5 && (P.openingEvade > 1 || hpF < 0.95 || attackedBy.has(e.id))
+        }) : undefined
+      if (openingThreat) mode = "rotate"
+      const rotationThreat = openingThreat ?? target
       const finalDistance = Math.hypot(x - obs.zone.next_center[0], y - obs.zone.next_center[1])
       const finalTravelTime = finalDistance / (me.stats.walk_speed ?? C.mech.walk_speed)
       const headingToFinal = P.zoneAnchor && obs.zone.next_radius === 0 && t + finalTravelTime * 1.35 + 8 >= obs.zone.shrink_start
@@ -640,9 +758,9 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
         let ne: Track | null = null
         for (const e of threats) if (!ne || dist(e) < dist(ne)) ne = e
         if (ne) wantFace = Math.atan2(ne.pos[1] - y, ne.pos[0] - x)
-      } else if (mode === "rotate" && target) {
-        const away = Math.atan2(y - target.pos[1], x - target.pos[0])
-        const d = dist(target)
+      } else if (mode === "rotate" && rotationThreat) {
+        const away = Math.atan2(y - rotationThreat.pos[1], x - rotationThreat.pos[0])
+        const d = dist(rotationThreat)
         let bestScore = -Infinity
         for (const offset of [0, -0.45, 0.45, -0.9, 0.9, -1.35, 1.35, -1.8, 1.8]) {
           const dx = Math.cos(away + offset), dy = Math.sin(away + offset)
@@ -662,12 +780,29 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
         }
         if (bestScore === -Infinity) mv = steer(x, y, z, Math.cos(away), Math.sin(away))
         boost = me.energy > (d < 55 ? 16 : 80)
-        wantFace = Math.atan2(target.pos[1] - y, target.pos[0] - x)
+        wantFace = Math.atan2(rotationThreat.pos[1] - y, rotationThreat.pos[0] - x)
+        if (openingThreat) {
+          let safePickup: Item | null = null, cost = Infinity
+          for (const pickup of pickups.values()) {
+            const [px, py, pz] = pickup.pos
+            const distance = Math.hypot(px - x, py - y)
+            if (pickup.kind === "gun" || distance > 52 || Math.abs(pz - z) > 4 || !inCircle(pickup.pos, sc, 5)) continue
+            if (t - (failedTake.get(pickup.id) ?? -99) < 4 || !nav.walkable(x, y, px, py)) continue
+            if ((px - x) * Math.cos(away) + (py - y) * Math.sin(away) < -distance * 0.15) continue
+            const exposure = routeExposure(x, y, px, py, enemies)
+            const value = distance * (1 + exposure) - (pickup.kind === "laser" ? 10 : 0)
+            if (exposure < 1.1 && value < cost) { cost = value; safePickup = pickup }
+          }
+          if (safePickup) mv = [safePickup.pos[0] - x, safePickup.pos[1] - y]
+          boost = d < 78 && me.energy > 12
+        }
       } else if (mode === "fight" && target) {
         const d = Math.hypot(target.pos[0] - x, target.pos[1] - y)
         const toT = Math.atan2(target.pos[1] - y, target.pos[0] - x)
         const tLight = target.weapons.includes("lightning")
         let pref = lightS >= 0 && me.energy > 20 ? P.lightRange : P.fightRange
+        const spacing = P.laserStandoff && laserS >= 0
+        if (spacing) pref = tLight ? 145 : target.weapons.includes("laser") ? 110 : 128
         if (P.opening && lightS < 0) {
           if (tLight || target.weapons.includes("laser")) pref += 12
           else if (hpF > 0.8 && seeingMe.length < 2 && target.weapons.length === 1) pref -= 25
@@ -683,6 +818,7 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
         }
         let radial = d > pref * 1.25 ? 1 : d < pref * 0.7 ? -0.8 : 0
         if (P.rangeControl) radial = Math.max(-2.8, Math.min(0.9, (d - pref) / 18))
+        if (spacing) radial = Math.max(-1.8, Math.min(0.65, (d - pref) / 28))
         if (tLight && lightS < 0 && d < P.kiteRange) radial = -1.5
         const perp = toT + (Math.PI / 2) * strafeDir
         const enemyArc = C.weapons.lightning.range
@@ -710,6 +846,16 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
           const ml0 = Math.hypot(mv[0], mv[1]) || 1
           if ((st[0] * mv[0] + st[1] * mv[1]) / ml0 < 0.2 && t > strafeUntil - (P.strafeMax - 0.3)) { strafeDir = -strafeDir; strafeUntil = t + P.strafeMin }
           mv = st
+        }
+        if (P.tacticalMove && me.grounded && losT && !escapingArc && d > 28 && d < 170) {
+          const gun = gunS >= 0 ? W[gunS] : null
+          const laser = laserS >= 0 ? W[laserS] : null
+          const canFire = !!gun && (gun.ammo ?? 0) > 0 && (gun.reload ?? 0) < 0.4 || !!laser && laser.cooldown < 0.5 ||
+            lightS >= 0 && d < C.weapons.lightning.range - 4 && me.energy > 12
+          const threats = [target, ...seeingMe.filter((foe) => foe !== target).slice(0, 3)]
+          if (!canFire || threats.length > 1 || P.tacticalMove > 1) {
+            mv = combatHeading(obs, target, threats, mv, pref, canFire, myH, muzZ - z)
+          }
         }
         // peek fighting: hide during reload when nothing else can fire
         if (P.peek && gunS >= 0 && !escapingArc) {
@@ -750,6 +896,7 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
           if (bestA) { mv = bestA; boost = me.energy > 5; dodging = t }
         }
         if (tLight && !contestArc && d < P.kiteRange && me.energy > 5) boost = true
+        if (spacing && d < pref - 25 && me.energy > 52 && t - lastDamagedT < 0.35) boost = true
         if (P.rangeControl && d < pref - 30 && me.energy > 55 && (recentlyHurt || target.charging) && lightS < 0) boost = true
       } else if (mode === "rest") {
         const known = [...tracks.values()].filter((e) => t - e.seen < 30)
@@ -1067,6 +1214,34 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
               if (Math.abs(wrap(shotYaw - intendedYaw)) < tol * targetScale && Math.abs(shotPitch - intendedPitch) < tol * 1.45 * targetScale &&
                   world.los(x, y, muzZ, ap[0], ap[1], ap[2], 0.8) && !strayRisk(shotYaw, shotPitch, gun.stats.range)) fire[gunS] = true
             }
+          }
+          if (P.timingAim && (gunS >= 0 || laserS >= 0)) {
+            const gun = gunS >= 0 ? W[gunS] : null
+            const laser = laserS >= 0 ? W[laserS] : null
+            const frame = 1 / C.match.tick_hz
+            const gunDelay = Math.max(1, Math.ceil(((gun?.cooldown ?? 0) - 1e-5) / frame)) * frame
+            const charging = (laser?.charge ?? 0) > 0
+            const solve = shotSolution(obs, target, mv, boost, gunDelay, gun?.stats.speed ?? C.weapons.gun.speed, charging)
+            const laserShot = laser && charging ? solve(true) : null
+            const gunShot = gun && gunDelay <= C.match.decide_every * frame ? solve(false) : null
+            const finishLaser = laser && laserShot && (laser.charge ?? 0) + frame >= laser.stats.min_charge &&
+              (laser.charge ?? 0) + frame >= (target.hp < 120 ? laser.stats.min_charge : laser.stats.charge - 0.02)
+            const laserAligned = laser && laserShot && laserShot.clear && laserShot.range < laser.stats.range &&
+              !strayRisk(laserShot.yaw, laserShot.pitch, laserShot.range + 5)
+            if (laser && charging) {
+              const expires = (laser.charge ?? 0) + 2 * frame >= laser.stats.charge + laser.stats.hold_s
+              fire[laserS] = !(laserAligned && finishLaser) && !expires
+              if (laserShot && (finishLaser || !gunShot || (laser.charge ?? 0) >= laser.stats.charge - 0.15)) {
+                aimYaw = laserShot.yaw
+                aimPitch = laserShot.pitch
+              }
+            }
+            if (gun && gunShot) {
+              const gunAligned = gunShot.clear && gunShot.range < gun.stats.range && !strayRisk(gunShot.yaw, gunShot.pitch, gun.stats.range)
+              const preferGun = !finishLaser && (!charging || (laser?.charge ?? 0) < (laser?.stats.charge ?? 0) - 0.15)
+              fire[gunS] = preferGun && gunAligned && (gun.ammo ?? 1) > 0 && (gun.reload ?? 0) <= 0
+              if (preferGun) { aimYaw = gunShot.yaw; aimPitch = gunShot.pitch }
+            } else if (gun) fire[gunS] = false
           }
         }
       } else {

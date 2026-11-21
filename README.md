@@ -14,7 +14,7 @@ npm run benchmark
 
 The benchmark defaults to seeds 1–100 and copies the simulator, configuration, and arena from `../builders/bot` into a temporary directory. The fixed house-bot tiers and hunter behavior follow that folder's `sim/eval.ts`. Set `BENCH_HARNESS` to a different checkout when needed. `BENCH_HARNESS=local` uses the simulator in this repository. Set `BENCH_RAW=1` to include each match’s result.
 
-Each match scores `16 - place`, with shared placement for same-tick deaths. The report averages placement points across the run and also gives wins, deaths before 60 seconds, and the bottom-quartile score. The current development target is **6.50 mean placement points over 100 matches in the fixed house-bot configuration**. The event scores 48 matches with its own opponents, physics, and private seeds. It breaks score ties by submission time.
+Each match scores `16 - place`, with shared placement for same-tick deaths. The report includes the mean, paired difference and its standard error, wins, bottom-four finishes, and deaths before 60 seconds. A perfect score requires first place in all 48 official practice matches. The event uses its own opponents, physics, and private seeds, and breaks score ties by submission time.
 
 The older experiments below used rotating opponent profiles. `BENCH_ROSTER=practice` or `BENCH_ROSTER=mixed` selects those alternate setups for reproducing historical tests.
 
@@ -30,9 +30,11 @@ These runs used the same copy of `builders/bot` for every policy, with the fixed
 | Heal longer and limit cube size | 5.71 | 1 | 19 | 61 |
 | Archived v6 | 3.11 | 0 | 33 | 63 |
 
-On seeds 101–200, scouting scored **5.83** against **5.08** for the published baseline. The gains across both batches averaged **0.62** points. Scouting is enabled locally, and the 6.50 target remains unmet.
+On seeds 101–200, scouting scored **5.83** against **5.08** for the published baseline. The gains across both batches averaged **0.62** points. Scouting was published in `7da82b2`, which the team reported scored **5.17** on the track.
 
 Claude’s original `sim/eval.ts` was run in a copy with the published bot and seeds 1–100. It returned 5.630 and matched the parallel benchmark on every placement. Compare the local scouting policy with `npm run benchmark -- 100 1 'published={"kitSearch":0}' 'scout={"kitSearch":2}'`. [Fixed-harness results](sim/claude-evaluation.json)
+
+The subsequent evaluation explores several ways to win more matches while tracking early losses. [Strategy research and results](sim/strategy-evaluation.md)
 
 ## Zone routing
 
