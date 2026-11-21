@@ -68,6 +68,7 @@ export const DEFAULT_P = {
   recoverEarly: 1,
   targetPriority: 1,
   armedGuard: 1,
+  kitSearch: 2,
 }
 export type Params = typeof DEFAULT_P
 
@@ -119,6 +120,8 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
   let anchor: number[] | null = null
   let anchorPhase = -1
   let anchorCheckedAt = -99
+  const surveyed = new Set<string>()
+  let surveyCheckedAt = -99
   const guardReady = (obs: Observation) => !P.armedGuard || !!obs.self.weapons[1]
 
   const wscore = (k: string | undefined) => (k === "laser" ? P.laserScore : k === "lightning" ? P.lightScore : k === "mortar" ? P.mortarScore : 0)
@@ -154,6 +157,60 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
     const r = Math.max(1, c.r - margin)
     if (d <= r) return p
     return [c.c[0] + (dx / d) * r, c.c[1] + (dy / d) * r]
+  }
+
+  const surveySize = 42
+  const surveyCell = (x: number, y: number) => `${Math.floor(x / surveySize)},${Math.floor(y / surveySize)}`
+
+  function rememberSurvey(obs: Observation) {
+    if (obs.t - surveyCheckedAt < 1.3) return
+    surveyCheckedAt = obs.t
+    const [x, y, z] = obs.self.pos
+    const eye = z + obs.self.stats.eye_height
+    const yaw = obs.self.aim[0]
+    surveyed.add(surveyCell(x, y))
+    for (const radius of [30, 63, 97, 138]) {
+      for (const offset of [-0.92, -0.46, 0, 0.46, 0.92]) {
+        const px = x + radius * Math.cos(yaw + offset), py = y + radius * Math.sin(yaw + offset)
+        const ground = world.ground(px, py)
+        if (world.inBounds(px, py, 4) && world.los(x, y, eye, px, py, ground + 1.3, 1.5)) surveyed.add(surveyCell(px, py))
+      }
+    }
+  }
+
+  function routeExposure(x: number, y: number, gx: number, gy: number, threats: Track[]): number {
+    const dx = gx - x, dy = gy - y
+    const lengthSq = dx * dx + dy * dy || 1
+    let exposure = 0
+    for (const foe of threats) {
+      const toward = ((foe.pos[0] - x) * dx + (foe.pos[1] - y) * dy) / lengthSq
+      if (toward <= 0.08) continue
+      const step = Math.min(1, toward)
+      const px = x + dx * step, py = y + dy * step
+      const lateral = Math.hypot(foe.pos[0] - px, foe.pos[1] - py)
+      const dangerRadius = foe.weapons.includes("lightning") ? 57 : 43
+      if (lateral < dangerRadius && world.los(foe.pos[0], foe.pos[1], foe.pos[2] + 7, px, py, world.ground(px, py) + 5, 1.5)) {
+        exposure += (1 - lateral / dangerRadius) * 2.5
+      }
+    }
+    return exposure
+  }
+
+  function safeLaserRoute(obs: Observation, threats: Track[], underFire: boolean): Item | null {
+    const [x, y, z] = obs.self.pos
+    let best: Item | null = null, bestCost = Infinity
+    for (const pickup of pickups.values()) {
+      if (pickup.kind !== "laser" || obs.t - (failedTake.get(pickup.id) ?? -99) < 4) continue
+      const [px, py, pz] = pickup.pos
+      const distance = Math.hypot(px - x, py - y)
+      const limit = underFire ? P.kitSearch > 2 ? 87 : 53 : 180
+      if (distance > limit || Math.abs(pz - z) > 4 || !inCircle(pickup.pos, safeCircle(obs, distance / 10 + 4), 6)) continue
+      const exposure = routeExposure(x, y, px, py, threats)
+      if (underFire && exposure > 0.55 || exposure > 2) continue
+      const approach = distance * (1 + exposure) + Math.min(24, obs.t - pickup.seen) * 1.4
+      if (approach < bestCost) { bestCost = approach; best = pickup }
+    }
+    return best
   }
 
   function findZoneAnchor(obs: Observation, enemies: Track[]): number[] | null {
@@ -353,6 +410,9 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
       const muzZ = z + (me.stats.muzzle_height ?? 7 * scale)
       const act: Omit<Action, "tick"> = {}
       const hpF = me.hp / me.max_hp
+
+      const lookingForLaser = P.kitSearch && t < 150 && !me.weapons.some((weapon) => weapon?.kind === "laser")
+      if (P.kitSearch > 1 && lookingForLaser) rememberSurvey(obs)
 
       // ---- tracking
       for (const tr of tracks.values()) tr.vis = false
@@ -744,6 +804,10 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
             considerGoal(n.pos, P.stockpile > 1 ? 3 : 1.5, null, n)
           }
         }
+        if (lookingForLaser && hpF > 0.57) {
+          const laser = safeLaserRoute(obs, enemies, false)
+          if (laser) { goal = laser.pos; lootCrate = null; lootDrone = null }
+        }
         const travelingToLoot = goal !== null
         if (P.zoneAnchor && goal === null && obs.zone.next_radius > 0 && obs.zone.next_radius <= (P.zoneAnchor > 1 ? 380 : 140)) {
           const threatenedAnchor = anchor && enemies.some((e) => Math.hypot(e.pos[0] - anchor![0], e.pos[1] - anchor![1]) < 55)
@@ -758,7 +822,9 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
         if (goal === null) {
           // wander inside goal circle, away from known enemies
           const crowdNearGoal = wander !== null && visible.some((e) => Math.hypot(e.pos[0] - wander![0], e.pos[1] - wander![1]) < 90)
-          if (!wander || t - wanderT > P.wanderS || Math.hypot(wander[0] - x, wander[1] - y) < 6 || !inCircle(wander, gc, P.zoneMargin) || (crowdNearGoal && t - wanderT > 2)) {
+          const surveying = P.kitSearch > 1 && lookingForLaser
+          const maxWanderTime = surveying ? Math.min(P.wanderS, 9) : P.wanderS
+          if (!wander || t - wanderT > maxWanderTime || Math.hypot(wander[0] - x, wander[1] - y) < 6 || !inCircle(wander, gc, P.zoneMargin) || (crowdNearGoal && t - wanderT > 2)) {
             let bestW: number[] | null = null, bws = -Infinity
             const known = [...tracks.values()]
             for (let k = 0; k < 40; k++) {
@@ -778,7 +844,8 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
                 if (dd < 80) segPen += 80 - dd
               }
               const rc = Math.hypot(p[0] - gc.c[0], p[1] - gc.c[1]) / Math.max(1, gc.r - P.zoneMargin)
-              const sc2 = md * P.wanderAvoid - travel * 0.25 + R() * 10 - segPen * P.segAvoid + rc * P.edgePref
+              const information = surveying && !surveyed.has(surveyCell(p[0], p[1])) ? 32 - Math.max(0, travel - 85) * 0.28 : 0
+              const sc2 = md * P.wanderAvoid - travel * 0.25 + R() * 10 - segPen * P.segAvoid + rc * P.edgePref + information
               if (sc2 > bws) { bws = sc2; bestW = p }
             }
             if (bestW) wander = bestW
@@ -843,6 +910,15 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
         if (salvage) {
           mv = [salvage.pos[0] - x, salvage.pos[1] - y]
           boost = me.energy > 60 && Math.hypot(mv[0], mv[1]) > 12
+        }
+      }
+
+      if (lookingForLaser && P.kitSearch < 4 && mode === "fight" && hpF > 0.72 && target && seeingMe.length < 2 && dist(target) > 47 && !shortRetreat) {
+        const laser = safeLaserRoute(obs, enemies, true)
+        if (laser) {
+          const distance = Math.hypot(laser.pos[0] - x, laser.pos[1] - y)
+          mv = goTo(obs, laser.pos[0], laser.pos[1], x, y, z)
+          boost = distance > 7 && me.energy > 48
         }
       }
 

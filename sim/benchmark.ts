@@ -1,31 +1,36 @@
-import { availableParallelism } from "node:os"
-import { isMainThread, parentPort, Worker } from "node:worker_threads"
+import { cpSync, existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs"
+import { availableParallelism, tmpdir } from "node:os"
+import { join, resolve } from "node:path"
+import { pathToFileURL } from "node:url"
+import { isMainThread, parentPort, Worker, workerData } from "node:worker_threads"
 import { DEFAULT_P, makeBot, type Params } from "../bot.ts"
 import { makeExample } from "./example.ts"
-import { runMatch } from "./sim.ts"
+import type { runMatch as localRunMatch } from "./sim.ts"
 
 type Variant = { name: string; params: Partial<Params> & { example?: boolean } }
 type Job = { variant: Variant; seed: number }
 type Result = {
-  variant: string; seed: number; score: number; t: number; kills: number; maxMs: number; slot: number; opponents: string[]
+  variant: string; seed: number; score: number; t: number; kills: number; maxMs: number; slot: number; opponents?: string[]
   st: { firstCombatDamageAt: number | null; firstSecondaryAt: number | null; firstLaserAt: number | null }
 }
-const roster = process.env.BENCH_ROSTER === "mixed" ? "mixed" : "practice"
-const submissionTarget = 10
+const requestedRoster = process.env.BENCH_ROSTER
+const roster = requestedRoster === "mixed" || requestedRoster === "practice" ? requestedRoster : undefined
+const developmentTarget = 6.5
 const evaluationMatches = 100
 
 if (!isMainThread) {
+  const { runMatch } = await import(workerData as string) as { runMatch: typeof localRunMatch }
   parentPort!.on("message", ({ variant, seed }: Job) => {
     const mainFactory = variant.params.example
       ? makeExample
       : (...args: Parameters<typeof makeBot>) => makeBot(args[0], args[1], args[2], variant.params)
     const result = runMatch({ seed, roster, mainFactory, strict: true })
-    if (result.score === undefined || result.slot === undefined || !result.opponents) throw new Error(`No placement for seed ${seed}`)
+    if (result.score === undefined || result.slot === undefined || roster && !result.opponents) throw new Error(`No placement for seed ${seed}`)
     if (result.score !== 16 - result.place || result.score < 0 || result.score > 15) throw new Error(`Invalid placement for seed ${seed}`)
     parentPort!.postMessage({ ...result, variant: variant.name } satisfies Result)
   })
 } else {
-  const [countArg = String(evaluationMatches), startArg = "501", ...variantArgs] = process.argv.slice(2)
+  const [countArg = String(evaluationMatches), startArg = "1", ...variantArgs] = process.argv.slice(2)
   const count = Number(countArg), start = Number(startArg)
   if (!Number.isSafeInteger(count) || count < 1 || !Number.isSafeInteger(start) || start < 0 || !Number.isSafeInteger(start + count - 1)) {
     throw new Error("Usage: node sim/benchmark.ts COUNT START_SEED 'name={...}' ...")
@@ -46,26 +51,45 @@ if (!isMainThread) {
   const workerCount = Math.min(jobs.length, Math.max(1, Math.floor(Number(process.env.BENCH_WORKERS) || Math.min(8, availableParallelism()))))
   const results: Result[] = []
   let next = 0
-  console.log(`${count} matches per variant · seeds ${start}–${start + count - 1} · ${roster} roster · ${workerCount} workers`)
-  await Promise.all(Array.from({ length: workerCount }, () => new Promise<void>((resolve, reject) => {
-    const worker = new Worker(new URL(import.meta.url))
-    let done = false
-    const dispatch = () => {
-      if (next < jobs.length) worker.postMessage(jobs[next++])
-      else {
-        done = true
-        void worker.terminate().then(() => resolve(), reject)
-      }
+  const harnessOption = process.env.BENCH_HARNESS
+  const harness = harnessOption === "local" ? resolve(import.meta.dirname!, "..")
+    : resolve(harnessOption ?? join(import.meta.dirname!, "../../builders/bot"))
+  if (!existsSync(join(harness, "sim/sim.ts"))) throw new Error(`Claude's harness was not found at ${harness}. Set BENCH_HARNESS to its folder.`)
+  const snapshot = mkdtempSync(join(tmpdir(), "mech-royale-benchmark-"))
+  const workers: Worker[] = []
+  try {
+    for (const folder of ["sim", "check"]) mkdirSync(join(snapshot, folder))
+    for (const file of ["package.json", "world.ts", "nav.ts", "geom.ts", "mechfight.ts", "sim/sim.ts", "check/stream.jsonl.gz", "arena"]) {
+      cpSync(join(harness, file), join(snapshot, file), { recursive: true })
     }
-    worker.on("error", reject)
-    worker.on("exit", (code) => { if (!done) reject(new Error(`Match worker exited early with code ${code}`)) })
-    worker.on("message", (result: Result) => {
-      results.push(result)
-      if (process.env.BENCH_PROGRESS === "1" && results.length % 20 === 0) console.log(`${results.length}/${jobs.length} matches complete`)
+    if (existsSync(join(harness, "sim/opponents.ts"))) cpSync(join(harness, "sim/opponents.ts"), join(snapshot, "sim/opponents.ts"))
+    const simulator = pathToFileURL(join(snapshot, "sim/sim.ts")).href
+    console.log(`${count} matches per variant · seeds ${start}–${start + count - 1} · ${roster ?? "fixed house-bot"} roster · ${workerCount} workers`)
+    console.log(`Harness ${harness}`)
+    await Promise.all(Array.from({ length: workerCount }, () => new Promise<void>((finish, reject) => {
+      const worker = new Worker(new URL(import.meta.url), { workerData: simulator })
+      workers.push(worker)
+      let done = false
+      const dispatch = () => {
+        if (next < jobs.length) worker.postMessage(jobs[next++])
+        else {
+          done = true
+          void worker.terminate().then(() => finish(), reject)
+        }
+      }
+      worker.on("error", reject)
+      worker.on("exit", (code) => { if (!done) reject(new Error(`Match worker exited early with code ${code}`)) })
+      worker.on("message", (result: Result) => {
+        results.push(result)
+        if (process.env.BENCH_PROGRESS === "1" && results.length % 20 === 0) console.log(`${results.length}/${jobs.length} matches complete`)
+        dispatch()
+      })
       dispatch()
-    })
-    dispatch()
-  })))
+    })))
+  } finally {
+    await Promise.allSettled(workers.map((worker) => worker.terminate()))
+    rmSync(snapshot, { recursive: true, force: true })
+  }
   const mean = (values: number[]) => values.reduce((sum, value) => sum + value, 0) / values.length
   const baseline = new Map(results.filter((r) => r.variant === variants[0].name).map((r) => [r.seed, r.score]))
   for (const { name } of variants) {
@@ -80,7 +104,8 @@ if (!isMainThread) {
     const beforeContact = runs.filter(({ st }) => st.firstSecondaryAt !== null &&
       (st.firstCombatDamageAt === null || st.firstSecondaryAt < st.firstCombatDamageAt)).length
     const earlyLaser = runs.filter(({ st }) => st.firstLaserAt !== null && st.firstLaserAt < 60).length
-    const gate = count === evaluationMatches && roster === "practice" ? `  target ${submissionTarget.toFixed(2)} ${average >= submissionTarget ? "met" : "unmet"}` : ""
+    const gate = count === evaluationMatches && !roster && harnessOption !== "local"
+      ? `  development target ${developmentTarget.toFixed(2)} ${average >= developmentTarget ? "met" : "unmet"}` : ""
     console.log(`${name.padEnd(14)} mean ${average.toFixed(2)}  paired Δ ${delta >= 0 ? "+" : ""}${delta.toFixed(2)}  range ${worst}–${best}  bottom quartile ${mean(tail).toFixed(2)}  wins ${wins}/${count}  early deaths ${earlyDeaths}/${count}  life ${mean(runs.map((r) => r.t)).toFixed(0)}s${gate}`)
     console.log(`  Secondaries before damage ${beforeContact}/${count}  laser before 60s ${earlyLaser}/${count}`)
     if (process.env.BENCH_RAW === "1") for (const run of runs) console.log(JSON.stringify(run))

@@ -12,9 +12,27 @@ npm run check
 npm run benchmark
 ```
 
-The benchmark runs 100 matches with varied spawns and slots. The default roster uses four easy, four medium, four hard, and three expert opponents per match. Three of the four expert profiles play each match, giving 16 distinct opponent profiles across the run. The opponents share sightings and add pursuers as the match progresses. Set `BENCH_ROSTER=mixed` to rotate the full roster for stress testing or `BENCH_RAW=1` to include each match’s result.
+The benchmark defaults to seeds 1–100 and copies the simulator, configuration, and arena from `../builders/bot` into a temporary directory. The fixed house-bot tiers and hunter behavior follow that folder's `sim/eval.ts`. Set `BENCH_HARNESS` to a different checkout when needed. `BENCH_HARNESS=local` uses the simulator in this repository. Set `BENCH_RAW=1` to include each match’s result.
 
-Each match scores `16 - place`, with shared placement for same-tick deaths. The report averages placement points across the run and also gives wins, deaths before 60 seconds, and the bottom-quartile score. The local submission gate is **10.00 mean placement points over 100 matches**. The event scores 48 matches with its own opponents, physics, and private seeds. It breaks score ties by submission time.
+Each match scores `16 - place`, with shared placement for same-tick deaths. The report averages placement points across the run and also gives wins, deaths before 60 seconds, and the bottom-quartile score. The current development target is **6.50 mean placement points over 100 matches in the fixed house-bot configuration**. The event scores 48 matches with its own opponents, physics, and private seeds. It breaks score ties by submission time.
+
+The older experiments below used rotating opponent profiles. `BENCH_ROSTER=practice` or `BENCH_ROSTER=mixed` selects those alternate setups for reproducing historical tests.
+
+## Fixed house-bot evaluation
+
+These runs used the same copy of `builders/bot` for every policy, with the fixed house-bot tiers and default hunter settings from `sim/eval.ts`. Only the main policy changed. The archived v6 is commit `2bac422`, and the published baseline is `8aca4aa`.
+
+| Policy | Seeds 1–100 | Wins | Deaths before 60 s | Laser before 60 s |
+| --- | ---: | ---: | ---: | ---: |
+| Published baseline | 5.63 | 1 | 18 | 64 |
+| Scout for a laser | 6.12 | 3 | 21 | 75 |
+| Scout and heal longer | 5.82 | 3 | 21 | 75 |
+| Heal longer and limit cube size | 5.71 | 1 | 19 | 61 |
+| Archived v6 | 3.11 | 0 | 33 | 63 |
+
+On seeds 101–200, scouting scored **5.83** against **5.08** for the published baseline. The gains across both batches averaged **0.62** points. Scouting is enabled locally, and the 6.50 target remains unmet.
+
+Claude’s original `sim/eval.ts` was run in a copy with the published bot and seeds 1–100. It returned 5.630 and matched the parallel benchmark on every placement. Compare the local scouting policy with `npm run benchmark -- 100 1 'published={"kitSearch":0}' 'scout={"kitSearch":2}'`. [Fixed-harness results](sim/claude-evaluation.json)
 
 ## Zone routing
 
@@ -36,11 +54,11 @@ All variants played the same 100 local seeds (`501–600`) with the practice ros
 | Matchup spacing and salvage | 5.68 | 1 | 23 |
 | Early zone staging | 4.40 | 1 | 33 |
 
-The main bot is below the 10.00 submission gate. The evaluation and repository are local.
+This table records the earlier rotating-profile experiments.
 
 ## Combat and recovery follow-up
 
-The development target is 9.00 placement points. After picking up a secondary, the main bot prioritizes active threats by how quickly it can neutralize them, predicts where to aim when it releases a charged laser, and seeks cover earlier when incoming damage rises. It holds cover through a reload and collects nearby cubes when the route is clear.
+This follow-up also used the rotating-profile setup. After picking up a secondary, the bot prioritizes active threats by how quickly it can neutralize them, predicts where to aim when it releases a charged laser, and seeks cover earlier when incoming damage rises. It holds cover through a reload and collects nearby cubes when the route is clear.
 
 | 100-match batch | Previous default | Cover and cube recovery throughout | Cover and cube recovery after secondary (main bot) | Main bot gain |
 | --- | ---: | ---: | ---: | ---: |
