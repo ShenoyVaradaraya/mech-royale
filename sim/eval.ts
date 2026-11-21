@@ -3,7 +3,7 @@ import { join } from "node:path"
 const N = +(process.argv[2] ?? 20)
 const params = process.argv[3] ?? "{}"
 const base = +(process.argv[4] ?? 1)
-const PAR = 12
+const PAR = 8
 const res: any[] = []
 let next = 0
 await new Promise<void>((done) => {

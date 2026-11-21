@@ -35,13 +35,24 @@ export const DEFAULT_P = {
   segAvoid: 0.5,
   edgePref: 0,
   repel: 1,
-  cubeCap: 99,
+  cubeCap: 10,
   restHp: 0,
   dropRange: 400,
   losDodge: 1,
   fireDiscipline: 1,
   strayClear: 7,
   thirdRepel: 1,
+  peek: 1,
+  peekR: 16,
+  camp: 1,
+  campAfter: 45,
+  campEnc: 7,
+  campInner: 0.6,
+  stealth: 0,
+  stealthClose: 25,
+  silentMove: 0.4,
+  finalCenter: 1,
+  finalR: 1,
   closeRange: 35,
 }
 export type Params = typeof DEFAULT_P
@@ -49,7 +60,7 @@ export type Params = typeof DEFAULT_P
 type Track = { id: number; pos: number[]; vel: number[]; aim: number[]; hp: number; maxHp: number; weapons: string[]; charging: boolean; seen: number; vis: boolean; cubes: number }
 type Item = { id: number; pos: number[]; kind?: string; hp?: number; seen: number }
 
-const UPG_PRI = ["armor", "plating", "laser_damage", "gun_rate", "gun_damage", "laser_charge", "lightning_efficiency", "nanites", "gun_mag", "lightning_range", "lightning_chain", "gyros", "servos", "gun_velocity", "reactor", "capacitor", "jets", "laser_pierce", "sensors", "mortar_reload", "mortar_splash", "mortar_velocity"]
+const UPG_PRI = ["plating", "armor", "laser_damage", "gun_rate", "gun_damage", "laser_charge", "lightning_efficiency", "nanites", "gun_mag", "lightning_range", "lightning_chain", "gyros", "servos", "gun_velocity", "reactor", "capacitor", "jets", "laser_pierce", "sensors", "mortar_reload", "mortar_splash", "mortar_velocity"]
 
 export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<Params>) {
   const P: Params = { ...DEFAULT_P, ...(params ?? {}) }
@@ -87,6 +98,12 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
   const npcAttack = new Map<number, number>()
   let lastTargetId = -1
   let dodging = -99
+  let peekCover: number[] | null = null
+  let peekT = -99
+  let hiding = -99
+  let camp: number[] | null = null
+  let campT = -99
+  let campNext: number[] | null = null
 
   const wscore = (k: string | undefined) => (k === "laser" ? P.laserScore : k === "lightning" ? P.lightScore : k === "mortar" ? P.mortarScore : 0)
 
@@ -148,6 +165,16 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
     return world.los(ex, ey, ez, x, y, z + h * 0.5, 1.5) || world.los(ex, ey, ez, x, y, z + h, 1.5)
   }
 
+  /** how enclosed a spot is: number of 12 horizontal directions blocked within r meters at chest height */
+  function enclosure(px: number, py: number, pz: number, r = 22): number {
+    let n = 0
+    for (let i = 0; i < 12; i++) {
+      const a = (i / 12) * Math.PI * 2
+      if (!world.los(px, py, pz + 5, px + Math.cos(a) * r, py + Math.sin(a) * r, pz + 5, 1.5)) n++
+    }
+    return n
+  }
+
   /** pick a walkable direction closest to desired vector (dx,dy) */
   function steer(x: number, y: number, z: number, dx: number, dy: number): number[] {
     const L = Math.hypot(dx, dy)
@@ -177,13 +204,13 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
     return bs === -Infinity ? [ux, uy] : best
   }
 
-  function findCover(obs: Observation, threats: Track[], x: number, y: number, z: number, h: number): number[] | null {
+  function findCover(obs: Observation, threats: Track[], x: number, y: number, z: number, h: number, maxR = P.coverSearch): number[] | null {
     const zc = safeCircle(obs, 8)
     const deadline = performance.now() + 7
     threats = threats.slice().sort((a, b) => Math.hypot(a.pos[0] - x, a.pos[1] - y) - Math.hypot(b.pos[0] - x, b.pos[1] - y)).slice(0, 4)
     let best: number[] | null = null
     let bs = Infinity
-    for (let rad = 6; rad <= P.coverSearch; rad += 7) {
+    for (let rad = 4; rad <= maxR; rad += maxR < 25 ? 4 : 7) {
       const n = Math.max(8, Math.round(rad / 3))
       for (let a = 0; a < n; a++) {
         const ang = (a / n) * Math.PI * 2 + rad
@@ -314,6 +341,7 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
         return v * (1 + 0.04 * Math.min(10, cubesN))
       }
       const myW = W.filter(Boolean).map((w) => w!.kind) as string[]
+      const hostileIdsAll = new Set(attackedBy.keys())
       let target: Track | null = null
       let tbest = Infinity
       for (const e of visible) {
@@ -324,7 +352,9 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
         const approaching = (e.vel[0] * Math.cos(toMe) + e.vel[1] * Math.sin(toMe)) > 3
         const hostile = attackedBy.has(e.id) || (facing && approaching && d < P.hostileRange) || d < P.closeRange
         const weak = e.hp < e.maxHp * 0.45
-        const want = hostile || weak || (P.aggressive && hpF > 0.8 && visible.length === 1)
+        const want = P.stealth
+          ? attackedBy.has(e.id) || (d < P.stealthClose && facing) || (d < 12)
+          : hostile || weak || (P.aggressive && hpF > 0.8 && visible.length === 1)
         if (!want) continue
         let s = d / 40 + e.hp / 400 + (losOk ? 0 : 4) - (attackedBy.has(e.id) ? 1 : 0)
         if (e.id === lastTargetId) s -= 0.7
@@ -371,6 +401,7 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
 
       // ---- movement goal
       let mv: number[] = [0, 0]
+      let silent = false
       let boost = false
       let jump = false
       const gc = goalCircle(obs, x, y)
@@ -433,6 +464,17 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
           if ((st[0] * mv[0] + st[1] * mv[1]) / ml0 < 0.2 && t > strafeUntil - (P.strafeMax - 0.3)) { strafeDir = -strafeDir; strafeUntil = t + P.strafeMin }
           mv = st
         }
+        // peek fighting: hide during reload when nothing else can fire
+        if (P.peek && gunS >= 0) {
+          const g = W[gunS]!
+          const reloading = (g.reload ?? 0) > 0.4 || (g.ammo ?? 1) <= 0
+          const laserReady = laserS >= 0 && W[laserS]!.cooldown <= 0.3
+          const lightReady = lightS >= 0 && d < 45 && me.energy > 10
+          if (reloading && !laserReady && !lightReady && losT) {
+            if (!peekCover || t - peekT > 1.0) { peekCover = findCover(obs, [target], x, y, z, myH, P.peekR); peekT = t }
+            if (peekCover) { mv = goTo(obs, peekCover[0], peekCover[1], x, y, z); boost = me.energy > 10; hiding = t }
+          }
+        }
         // dodge lasers: any enemy charging aimed at us
         const danger = visible.some((e) => e.charging && Math.abs(wrap(e.aim[0] - Math.atan2(y - e.pos[1], x - e.pos[0]))) < 0.25)
         boost = !!P.boostDodge && (danger || recentlyHurt) && me.energy > (lightS >= 0 ? 35 : 20)
@@ -490,6 +532,47 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
           if (v > 0) considerGoal(p.pos, v)
         }
         if (me.cubes < P.cubeCap) for (const c of cubes.values()) if (Math.abs(c.pos[2] - z) < 4) considerGoal(c.pos, 4)
+        // PUBG-style: once armed (or after campAfter s), hold a cover-rich spot in the safe circle
+        const armed = !!(W[0] && W[1])
+        if (goal === null && P.camp && (armed || t > P.campAfter)) {
+          const crowded = camp !== null && (visible.some((e) => !hostileIdsAll.has(e.id) && Math.hypot(e.pos[0] - camp![0], e.pos[1] - camp![1]) < 60)
+            || (P.stealth && visible.some((e) => Math.hypot(e.pos[0] - camp![0], e.pos[1] - camp![1]) < 200 && visibleFrom(e.pos[0], e.pos[1], e.pos[2] + 8, camp![0], camp![1], z, myH))))
+          // zone prediction: every future circle lies inside the announced next circle,
+          // so camp deep inside it (re-chosen whenever a new circle is announced)
+          const nz = { c: obs.zone.next_center, r: obs.zone.next_radius }
+          const campCircle = nz.r > 5 ? nz : gc
+          const nextChanged = campNext === null || Math.hypot(campNext[0] - nz.c[0], campNext[1] - nz.c[1]) > 1 || Math.abs(campNext[2] - nz.r) > 1
+          if (!camp || nextChanged || !inCircle(camp, campCircle, Math.min(P.zoneMargin, campCircle.r * 0.3)) || (crowded && t - campT > 3)) {
+            campNext = [nz.c[0], nz.c[1], nz.r]
+            let bestC: number[] | null = null, bcs = -Infinity
+            const known = [...tracks.values()]
+            const t0 = performance.now()
+            for (let k = 0; k < 60 && performance.now() - t0 < 5; k++) {
+              const a = R() * Math.PI * 2, rr = Math.sqrt(R()) * Math.max(3, campCircle.r * P.campInner)
+              const p = [campCircle.c[0] + Math.cos(a) * rr, campCircle.c[1] + Math.sin(a) * rr]
+              const kk = nav.cell(p[0], p[1])
+              if (kk < 0 || !nav.ok[kk]) continue
+              if (!inCircle(p, gc, 0)) continue
+              let md = 200
+              for (const e of known) md = Math.min(md, Math.hypot(e.pos[0] - p[0], e.pos[1] - p[1]) + (t - e.seen) * 2)
+              if (P.stealth) {
+                let seen = false
+                for (const e of known) if (t - e.seen < 30 && Math.hypot(e.pos[0] - p[0], e.pos[1] - p[1]) < 220 && visibleFrom(e.pos[0], e.pos[1], e.pos[2] + 8, p[0], p[1], nav.s[kk], myH)) { seen = true; break }
+                if (seen) continue
+              }
+              const enc = enclosure(p[0], p[1], nav.s[kk])
+              const travel = Math.hypot(p[0] - x, p[1] - y)
+              // prefer partially enclosed (corner) spots, far from enemies, deeper in next circle
+              const sc2 = -Math.abs(enc - P.campEnc) * 8 + md * 0.5 - travel * 0.15
+              if (sc2 > bcs) { bcs = sc2; bestC = p }
+            }
+            if (bestC) { camp = bestC; campT = t }
+          }
+          if (camp) goal = camp
+        }
+        if (P.finalCenter && obs.zone.next_radius <= P.finalR) {
+          goal = [obs.zone.next_center[0], obs.zone.next_center[1]]
+        }
         if (goal === null) {
           // wander inside goal circle, away from known enemies
           const crowdNearGoal = wander !== null && visible.some((e) => Math.hypot(e.pos[0] - wander![0], e.pos[1] - wander![1]) < 90)
@@ -524,7 +607,7 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
         if (goal) {
           const gg = goal as number[]
           mv = goTo(obs, gg[0], gg[1], x, y, z)
-          if (Math.hypot(gg[0] - x, gg[1] - y) < 1.0) mv = [0, 0]
+          if (Math.hypot(gg[0] - x, gg[1] - y) < (gg === camp ? 2.5 : 1.0)) mv = [0, 0]
         }
         if (P.repel) {
           let rx = 0, ry = 0
@@ -538,6 +621,10 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
           }
         }
         boost = !inCircle([x, y], gc, 0) && me.energy > 20
+        if (P.stealth && inCircle([x, y], safeCircle(obs, 15), P.zoneMargin * 0.5) && !boost) {
+          const ml0 = Math.hypot(mv[0], mv[1])
+          if (ml0 > 0) { mv = [(mv[0] / ml0) * P.silentMove, (mv[1] / ml0) * P.silentMove]; silent = true }
+        }
         // supply drop
         if (P.dropGrab) {
           for (const dr of obs.drops) {
@@ -634,7 +721,7 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
       } else {
         // not fighting: shoot crates / npcs if cheap, else scan
         let shot = false
-        if (mode === "loot" && gunS >= 0) {
+        if (mode === "loot" && gunS >= 0 && (!P.stealth || [...npcAttack.values()].some((tt) => t - tt < 4))) {
           let best: { pos: number[]; h: number } | null = null
           let bd = Infinity
           for (const c of crates.values()) {
@@ -695,7 +782,7 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
       }
 
       const ml = Math.hypot(mv[0], mv[1])
-      act.move = ml > 1e-6 ? [mv[0] / ml, mv[1] / ml] : [0, 0]
+      act.move = ml > 1e-6 ? (silent ? [mv[0], mv[1]] : [mv[0] / ml, mv[1] / ml]) : [0, 0]
       act.boost = boost
       act.jump = jump
       act.aim = [wrap(aimYaw), Math.max(C.mech.min_pitch, Math.min(C.mech.max_pitch, aimPitch))]

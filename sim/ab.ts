@@ -13,11 +13,12 @@ let base: any[] | null = null
 for (const c of cfgs) {
   const r = run(c)
   const sc = r.map((x) => x.score)
+  const errs = r.reduce((a, x) => a + (x.st?.errors ?? 0), 0)
   const [m, se] = stat(sc)
   const early = r.filter((x) => x.t < 60).length / r.length
   const wq = sc.slice().sort((a, b) => a - b).slice(0, Math.ceil(sc.length / 4))
   let diff = ""
   if (!base) base = r
   else { const d = r.map((x, i) => x.score - base![i].score); const [dm, dse] = stat(d); diff = `  diff ${dm >= 0 ? "+" : ""}${dm.toFixed(2)} ± ${dse.toFixed(2)}` }
-  console.log(`${m.toFixed(2)} ± ${se.toFixed(2)}${diff}  early<60s ${(early * 100).toFixed(0)}%  worstQ ${stat(wq)[0].toFixed(2)}  ${c}`)
+  console.log(`${m.toFixed(2)} ± ${se.toFixed(2)}${diff}  early<60s ${(early * 100).toFixed(0)}%  worstQ ${stat(wq)[0].toFixed(2)}${errs ? `  !!ERRORS ${errs}` : ""}  ${c}`)
 }

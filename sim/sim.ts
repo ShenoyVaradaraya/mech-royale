@@ -116,7 +116,7 @@ export function runMatch(opts: MatchOpts) {
     })
   }
   const main = mechs[mainSlot]
-  const ST = { shots: 0, gunHits: 0, dealt: 0, taken: 0, laserShots: 0, laserHits: 0, takenBy: {} as Record<string, number>, deathNear: 0, killerTier: null as any, deathHunters: 0 }
+  const ST = { shots: 0, gunHits: 0, dealt: 0, taken: 0, laserShots: 0, laserHits: 0, takenBy: {} as Record<string, number>, deathNear: 0, killerTier: null as any, deathHunters: 0, errors: 0 }
   // ---- loot, crates, npcs
   const W = ["mortar", "laser", "lightning"]
   for (let i = 0; i < C.loot.floor_count; i++) { const p = randOk(Z.start_center[0], Z.start_center[1], Z.start_radius * 0.85); if (p) picks.push({ id: nextId.pick++, kind: W[Math.floor(R() * 3)], pos: p }) }
@@ -529,7 +529,7 @@ export function runMatch(opts: MatchOpts) {
 
   // ---- house AI
   const squad = { mainPos: null as number[] | null, mainT: -99, mainVel: [0, 0, 0] }
-  const HC = { noise: [0.1, 0.06, 0.035, 0.018], lead: [0.3, 0.7, 0.9, 1.0], react: [1, 0.7, 0.4, 0.25], engageNear: 30, hunt0: 1, laserRate: 1, ...(JSON.parse(process.env.HOUSE ?? "{}")) }
+  const HC = { noise: [0.1, 0.06, 0.035, 0.018], lead: [0.3, 0.7, 0.9, 1.0], react: [1, 0.7, 0.4, 0.25], engageNear: 30, hunt0: 1, laserRate: 1, omni: 1, ...(JSON.parse(process.env.HOUSE ?? "{}")) }
   const AIM_NOISE = HC.noise, LEAD = HC.lead, REACT = HC.react
   const houseThink = (m: Mech) => {
     const ai = m.ai
@@ -555,7 +555,7 @@ export function runMatch(opts: MatchOpts) {
     const zr = Math.max(5, z.next_radius * 0.8)
     const inSafe = (p: number[]) => Math.hypot(p[0] - z.next_center[0], p[1] - z.next_center[1]) < zr
     if (engage && squad.mainPos && t - squad.mainT < 30) goal = squad.mainPos
-    else if (engage && isHunter && main.alive) goal = [main.pos[0] + (R() - 0.5) * 40, main.pos[1] + (R() - 0.5) * 40]
+    else if (engage && isHunter && main.alive && HC.omni) goal = [main.pos[0] + (R() - 0.5) * 40, main.pos[1] + (R() - 0.5) * 40]
     if (!goal) {
       if (!m.weapons[1] && t < 120) {
         let bp: Pick | null = null, bd = 150
@@ -699,7 +699,7 @@ export function runMatch(opts: MatchOpts) {
           const ob = buildObs(m)
           const t0 = performance.now()
           let a: any = {}
-          try { a = bot.act(ob) ?? {} } catch (e) { if (opts.verbose) console.error(e); a = {} }
+          try { a = bot.act(ob) ?? {} } catch (e) { ST.errors = (ST.errors ?? 0) + 1; if (opts.verbose || (ST.errors ?? 0) <= 1) console.error(e); a = {} }
           mainDecisionMs = Math.max(mainDecisionMs, performance.now() - t0)
           const c = m.ctrl
           c.move = a.move ?? [0, 0]; c.boost = !!a.boost; c.jump = !!a.jump; c.aim = a.aim ?? c.aim; c.fire = a.fire ?? [false, false]; c.reload = !!a.reload
