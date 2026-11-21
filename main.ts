@@ -15,6 +15,8 @@ run((hello) => {
   for (let i = 0; i < 6; i++) {
     nav.path(-200 + i * 60, -100, 0, 150 - i * 40, 120, undefined, 12000)
     for (let k = 0; k < 300; k++) world.los(-300 + k, -50, 5, 200 - k, 80, 8, 1)
+    // builds the tree grid and compiles the canopy check before the first observation
+    for (let k = 0; k < 300; k++) world.treeClear(-300 + k, -50, 8, 200 - k, 80, 4.5)
   }
   log(`map loaded + warmed in ${(performance.now() - t0).toFixed(0)} ms`)
   return makeBot(hello, world, nav)

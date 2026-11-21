@@ -78,10 +78,15 @@ export const DEFAULT_P = {
   standFight: 0, // max enemies within 120 m for which we stand and fight instead of fleeing a chaser
   standEnergy: 25,
   standR: 75,
-  ghost: 1, // survival mode: after ghostT never start fights, hide concealed in the next circle, move silently
+  ghost: 0, // survival mode: after ghostT never start fights, hide concealed in the next circle, move silently
   ghostT: 360, // phase 5 starts at 350 s: from here only HP at the final collapse matters
   ghostQuiet: 70,
-  trees: 1, // model tree concealment in our own visibility checks (cover, hiding, MRM)
+  budgetMs: 25, // per-decision time budget for optional searches (limit is 50 ms on 1 CPU)
+  killCleanup: 1, // always forget a mech we killed
+  laserCounter: 0, // no laser/lightning: break LOS from laser carriers; with lightning: close in to short them; dodge charging lasers in any mode
+  preempt: 0, // treat enemies aiming at us (clear line, <230 m) as hostile
+  spin: 0, // idle look-around: rotate the torso continuously when no enemy is known
+  trees: 0, // model tree concealment in our own visibility checks (cover, hiding, MRM)
   detailR: 140,
   detailGap: 35,
 }
@@ -96,6 +101,11 @@ const SUSTAIN_UPGRADES = ["plating", "armor", "nanites", "gun_mag", "gun_damage"
 
 export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<Params>) {
   const P: Params = { ...DEFAULT_P, ...(params ?? {}) }
+  // Hard per-decision time budget: optional searches stop once it is spent so we always answer well inside 50 ms.
+  // The local simulator sets MECH_NO_BUDGET so its results do not depend on machine load.
+  const noBudget = typeof process !== "undefined" && !!process.env?.MECH_NO_BUDGET
+  let tickStart = 0
+  const overBudget = () => !noBudget && performance.now() - tickStart > P.budgetMs
   const C = hello.config
   const R = rng(1)
   const me_id = hello.slot
@@ -241,6 +251,7 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
     let best: number[] | null = null
     let bestScore = Infinity
     for (const fraction of ghosting ? [0, 0.25, 0.5, 0.75, 1] : [0, 0.45, 0.75, 1]) {
+      if (overBudget() && best) break
       const steps = fraction === 0 ? 1 : ghosting ? 12 : 8
       for (let i = 0; i < steps; i++) {
         const angle = i * 2 * Math.PI / steps
@@ -274,7 +285,7 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
     const t = obs.t
     const distance = Math.hypot(gx - x, gy - y)
     if (P.battleRoyale && distance <= 40 && nav.walkable(x, y, gx, gy)) return [gx - x, gy - y]
-    const need = !path || !pathGoal || Math.hypot(pathGoal[0] - gx, pathGoal[1] - gy) > 6 || t - pathT > 2.5
+    const need = (!path || !pathGoal || Math.hypot(pathGoal[0] - gx, pathGoal[1] - gy) > 6 || t - pathT > 2.5) && !(path && overBudget())
     if (need) {
       const zc = safeCircle(obs, 5)
       const r2 = Math.max(5, zc.r)
@@ -338,6 +349,7 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
     let best: number[] | null = null
     let bs = Infinity
     for (let rad = 4; rad <= maxR; rad += maxR < 25 ? 4 : 7) {
+      if (overBudget()) break
       const n = Math.max(8, Math.round(rad / 3))
       for (let a = 0; a < n; a++) {
         const ang = (a / n) * Math.PI * 2 + rad
@@ -429,6 +441,7 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
   return {
     name: "builders-gpt",
     act(obs: Observation): Omit<Action, "tick"> {
+      tickStart = performance.now()
       const t = obs.t
       const dt = Math.max(0.05, t - lastT)
       lastT = t
@@ -477,9 +490,10 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
         } else if (e.type === "damaged") {
           // zone damage: does not count as combat for our logic
         } else if (e.type === "take_failed") failedTake.set(e.id, t)
-        else if (e.type === "kill" && P.harvest && guardReady(obs)) {
+        else if (e.type === "kill" && (P.killCleanup || P.harvest && guardReady(obs))) {
+          // a confirmed kill is never a threat again (previously only cleared when holding a secondary)
           const defeated = tracks.get(e.target)
-          if (defeated) freshSalvage = { pos: defeated.pos, until: t + 7 }
+          if (defeated && P.harvest && guardReady(obs)) freshSalvage = { pos: defeated.pos, until: t + 7 }
           tracks.delete(e.target)
           lastAttack.delete(e.target)
         }
@@ -542,7 +556,9 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
         const toMe = Math.atan2(y - e.pos[1], x - e.pos[0])
         const facing = Math.abs(wrap(e.aim[0] - toMe)) < 0.5
         const approaching = (e.vel[0] * Math.cos(toMe) + e.vel[1] * Math.sin(toMe)) > 3
-        const hostile = attackedBy.has(e.id) || (facing && approaching && d < P.hostileRange) || d < P.closeRange
+        // preempt: a mech pointing its gun at us with a clear line is hunting us; shoot first instead of waiting to be hit
+        const aimedAtUs = P.preempt && losOk && d < 230 && Math.abs(wrap(e.aim[0] - toMe)) < 0.12
+        const hostile = attackedBy.has(e.id) || (facing && approaching && d < P.hostileRange) || d < P.closeRange || aimedAtUs
         const weak = e.hp < e.maxHp * 0.45 && (!P.survival || losOk && hpF > 0.65 && d < 100)
         const goodOpening = P.battleRoyale && P.survival < 2 && hpF > 0.85 && !!W[1] && losOk && d < 85 &&
           (!e.weapons.includes("lightning") || d > C.weapons.lightning.range + 12) &&
@@ -609,7 +625,10 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
       // finishing a weak close target overrides retreat
       const finish = target && target.hp < P.finishHp && dist(target) < 120 && hpF > 0.15 &&
         (!P.survival || ttdMe > Math.max(1.5, ttkT * 2) && activeAttackers < 3)
-      mode = shortRetreat || (healing || disengage) && !finish ? "retreat" : target ? "fight" : "loot"
+      // laser counter: with neither laser nor lightning, a laser carrier out-trades us at range (2/13 in hard duels), so break LOS
+      const laserAvoid = P.laserCounter > 0 && laserS < 0 && lightS < 0 && visible.some((e) => e.weapons.includes("laser") && e.hp > 300 &&
+        dist(e) > 45 && dist(e) < 280 && seeingMe.includes(e) && !(target && target.id === e.id && target.hp < P.finishHp))
+      mode = shortRetreat || (healing || disengage || laserAvoid) && !finish ? "retreat" : target ? "fight" : "loot"
       // can't outrun a chaser that keeps hitting us: fleeing only gives it free shots, so fight back
       if (P.standFight && mode === "retreat" && target && !finish && hpF > 0.12 && me.energy < P.standEnergy &&
           t - lastDamagedT < 0.8 && dist(target) < P.standR && attackedBy.has(target.id) &&
@@ -734,6 +753,8 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
           else pref = W[lightS]!.stats.range * 0.81
         }
         if (tLight && !(lightS >= 0 && me.energy > 20)) pref = Math.max(pref, P.kiteRange)
+        const shortCircuit = P.laserCounter > 0 && lightS >= 0 && laserS < 0 && target.weapons.includes("laser") && me.energy > 15
+        if (shortCircuit) pref = Math.min(pref, C.weapons.lightning.range * 0.6)
         if (t > strafeUntil) {
           strafeDir = R() < 0.5 ? -1 : 1
           strafeUntil = t + P.strafeMin + R() * (P.strafeMax - P.strafeMin)
@@ -854,6 +875,7 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
           if (bestA) { mv = bestA; boost = me.energy > 5; dodging = t }
         }
         if (tLight && !contestArc && d < P.kiteRange && me.energy > 5) boost = true
+        if (shortCircuit && d > C.weapons.lightning.range * 0.8 && me.energy > 25) boost = true
         if (P.rangeControl && d < pref - 30 && me.energy > 55 && (recentlyHurt || target.charging) && lightS < 0) boost = true
       } else if (mode === "rest") {
         const known = [...tracks.values()].filter((e) => t - e.seen < 30)
@@ -1055,6 +1077,30 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
         }
       }
 
+      // laser counter (any mode but fight, which has its own dodge): a visible charging laser aimed at us -> step out of its sight
+      if (P.laserCounter > 0 && mode !== "fight") {
+        const ch = visible.filter((e) => e.charging && Math.abs(wrap(e.aim[0] - Math.atan2(y - e.pos[1], x - e.pos[0]))) < 0.25 &&
+          visibleFrom(e.pos[0], e.pos[1], e.pos[2] + 8, x, y, z, myH))
+        if (ch.length) {
+          const reach = me.energy > 15 ? 9 : 5.5
+          let bestA: number[] | null = null, bd2 = Infinity
+          for (let i = 0; i < 16; i++) {
+            const a = (i / 16) * Math.PI * 2
+            const st = steer(x, y, z, Math.cos(a), Math.sin(a))
+            if (Math.abs(st[0] - Math.cos(a)) > 0.01 || Math.abs(st[1] - Math.sin(a)) > 0.01) continue
+            const px = x + Math.cos(a) * reach, py = y + Math.sin(a) * reach
+            if (!ch.every((e) => !visibleFrom(e.pos[0], e.pos[1], e.pos[2] + 8, px, py, z, myH))) continue
+            const dev = Math.abs(wrap(a - Math.atan2(mv[1], mv[0])))
+            if (dev < bd2) { bd2 = dev; bestA = [Math.cos(a), Math.sin(a)] }
+          }
+          if (bestA) { mv = bestA; boost = me.energy > 5; quiet = false }
+          else {
+            // no cover in reach: sprint across its line of fire
+            const e = ch[0], toE = Math.atan2(e.pos[1] - y, e.pos[0] - x)
+            mv = steer(x, y, z, Math.cos(toE + Math.PI / 2 * strafeDir), Math.sin(toE + Math.PI / 2 * strafeDir)); boost = me.energy > 5; quiet = false
+          }
+        }
+      }
       if (P.projectileDodge && (mode === "fight" || mode === "retreat")) {
         mv = sidestepProjectiles(obs, mv, boost, myH, C.mech.radius * scale)
       }
@@ -1223,7 +1269,11 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
             const heard = obs.sounds.filter((s) => s.kind !== "step" && s.kind !== "death" && s.kind !== "drop" && s.kind !== "crate" && s.kind !== "npc_gun")
             if (heard.length) aimYaw = heard[0].bearing
             else if (lk && t - lk.seen < 15) aimYaw = Math.atan2(lk.pos[1] - y, lk.pos[0] - x)
-            else {
+            else if (P.spin) {
+              // full 360° look-around: turn_rate 4 rad/s sweeps the 120° view wedge round in ~1.6 s,
+              // legs move independently, so nobody can approach unseen from behind
+              aimYaw = wrap(me.aim[0] + 1.2)
+            } else {
               scanPhase += dt * 1.2
               const base = Math.hypot(mv[0], mv[1]) > 0.1 ? Math.atan2(mv[1], mv[0]) : me.aim[0]
               aimYaw = base + Math.sin(scanPhase) * 1.2

@@ -10,6 +10,7 @@ import { assignOpponents, type Opponent } from "./opponents.ts"
 
 const ROOT = join(import.meta.dirname!, "..")
 const SIM_TREES = process.env.TREES === "1"
+process.env.MECH_NO_BUDGET = "1" // bot time budget off in simulation: results must not depend on machine load
 export const HELLO: Hello = JSON.parse(gunzipSync(readFileSync(join(ROOT, "check/stream.jsonl.gz"))).toString().split("\n")[0])
 const C: any = HELLO.config
 const DT = 1 / C.match.tick_hz
@@ -214,6 +215,7 @@ export function runMatch(opts: MatchOpts) {
     if (m === main) { ST.deathNear = mechs.filter((o) => o.alive && o !== m && Math.hypot(o.pos[0] - m.pos[0], o.pos[1] - m.pos[1]) < 120).length; ST.killerTier = mechs[by]?.tier ?? (by >= 100 ? 'npc' : 'zone'); ST.deathHunters = Math.min(15, 1 + (15 - mechs.filter((o) => o.alive && o.house).length) + (t > 200 ? 2 : 0) + (t > 290 ? 15 : 0)) }
     const k = mechs[by]
     if (k && by !== m.id) { k.kills++; k.events.push({ type: "kill", target: m.id }) }
+    if (k === main && m.house) { const kt = ((ST as any).killsByTier ??= [0, 0, 0, 0]); kt[m.tier]++ }
     const n = m.cubes + C.cubes.death_drop_extra
     for (let i = 0; i < n; i++) cubes.push({ id: nextId.cube++, pos: [m.pos[0] + (R() - 0.5) * 6, m.pos[1] + (R() - 0.5) * 6, m.pos[2]] })
     for (const w of m.weapons) if (w && w.kind !== "gun") picks.push({ id: nextId.pick++, kind: w.kind, pos: [m.pos[0] + (R() - 0.5) * 3, m.pos[1] + (R() - 0.5) * 3, m.pos[2]], wpn: { ...w, charging: false, charge: 0 } })
@@ -238,7 +240,10 @@ export function runMatch(opts: MatchOpts) {
       const key = weapon + (att ? ':t' + att.tier : '')
       ST.takenBy[key] = (ST.takenBy[key] ?? 0) + a
       if (weapon !== "zone" && by !== m.id) ST.firstCombatDamageAt ??= +t.toFixed(1)
+      if (weapon === "gun" && att) (ST as any).foeGunHits = ((ST as any).foeGunHits ?? 0) + 1
+      if (rear) (ST as any).rearTaken = ((ST as any).rearTaken ?? 0) + a
     }
+    if (by === main.id && m !== main && weapon !== "zone") (ST as any).firstDealtAt ??= +t.toFixed(1)
     if (by === main.id && m !== main) { ST.dealt += a; if (weapon === 'gun') ST.gunHits++; if (weapon === 'laser') ST.laserHits++ }
     if (att && by !== m.id) { att.combatT = t; att.events.push({ type: "hit", target: m.id, amount: +a.toFixed(2), weapon, ...(rear ? { rear } : {}) }) }
     const bearing = weapon === "zone" ? null : +Math.atan2(from[1] - m.pos[1], from[0] - m.pos[0]).toFixed(3)
@@ -385,6 +390,7 @@ export function runMatch(opts: MatchOpts) {
         projs.push({ kind: "gun", pos: o, vel: d.map((v) => v * ws.speed), owner: m.id, dmg: ws.damage * dmgMult(m), travel: 0, range: ws.range, ttl: 5 })
         sound("gun", m.pos, m.id)
         if (m === main) ST.shots++
+        else (ST as any).foeShots = ((ST as any).foeShots ?? 0) + 1
       } else if (w.kind === "mortar") {
         w.cooldown = ws.cooldown
         const o = shotOrigin(m, m.ms.height * scaleOf(m) + 0.5), d = aimDir(m)
@@ -582,7 +588,27 @@ export function runMatch(opts: MatchOpts) {
     let goal: number[] | null = null
     const zr = Math.max(5, z.next_radius * 0.8)
     const inSafe = (p: number[]) => Math.hypot(p[0] - z.next_center[0], p[1] - z.next_center[1]) < zr
-    if (engage && squad.mainPos && t - squad.mainT < 30) goal = squad.mainPos
+    if (HC.heal && m.tier >= 2) {
+      if (!ai.healing && m.hp < m.maxHp * HC.heal) ai.healing = true
+      if (ai.healing && m.hp > m.maxHp * 0.9) ai.healing = false
+    }
+    if (ai.healing) {
+      // break line of sight: pick a reachable point away from main that main can't see, then regen
+      if (!ai.hideP || t - ai.hideT > 2) {
+        let best: number[] | null = null, bs = Infinity
+        for (let k = 0; k < 24; k++) {
+          const a = R() * Math.PI * 2, r = 15 + R() * 45
+          const p = [x + Math.cos(a) * r, y + Math.sin(a) * r]
+          const kk = nav.cell(p[0], p[1]); if (kk < 0 || !nav.ok[kk]) continue
+          const seen = main.alive && world.los(main.pos[0], main.pos[1], main.pos[2] + 8, p[0], p[1], nav.s[kk] + 4.5, 1.5)
+          const sc = (seen ? 100 : 0) - Math.hypot(p[0] - main.pos[0], p[1] - main.pos[1]) * 0.3 + r * 0.2
+          if (sc < bs) { bs = sc; best = p }
+        }
+        ai.hideP = best; ai.hideT = t
+      }
+    }
+    if (ai.healing && ai.hideP) goal = ai.hideP
+    else if (engage && squad.mainPos && t - squad.mainT < 30) goal = squad.mainPos
     else if (engage && isHunter && main.alive) goal = [main.pos[0] + (R() - 0.5) * 40, main.pos[1] + (R() - 0.5) * 40]
     if (!goal) {
       if (!m.weapons[1] && t < 120) {
@@ -600,7 +626,7 @@ export function runMatch(opts: MatchOpts) {
     }
     // fight
     let mv = [0, 0]
-    const tgt = engage && seesMain ? main : null
+    const tgt = engage && seesMain && !(ai.healing && Math.hypot(main.pos[0] - x, main.pos[1] - y) > 30) ? main : null
     if (tgt) {
       if (ai.sawT === undefined || ai.sawT < 0) ai.sawT = t
     } else ai.sawT = -1
@@ -931,6 +957,6 @@ export function runMatch(opts: MatchOpts) {
   }
   const houseDeaths = mechs.filter((m) => m.house && !m.alive).length
   if (opts.duel !== undefined && foeMech) return { seed: opts.seed, win: main.alive && !foeMech.alive ? 1 : !main.alive && foeMech.alive ? 0 : 0.5, hp: main.alive ? main.hp / main.maxHp : 0, t, mainW: main.weapons[1]?.kind, foeW: foeMech.weapons[1]?.kind, mainHpLeft: main.hp | 0, foeHpLeft: foeMech.hp | 0 }
-  if (opts.duel !== undefined) return { seed: opts.seed, win: main.alive ? 1 : 0, hp: main.alive ? main.hp / main.maxHp : 0, t, foe: mechs.find((m) => m.house && m.ai.rank === 0)?.weapons[1]?.kind }
+  if (opts.duel !== undefined) return { seed: opts.seed, win: main.alive ? 1 : 0, hp: main.alive ? main.hp / main.maxHp : 0, t, foe: mechs.find((m) => m.house && m.ai.rank === 0)?.weapons[1]?.kind, mainW: main.weapons[1]?.kind, st: ST }
   return { seed: opts.seed, slot: mainSlot, place: main.place, score: 16 - main.place, kills: main.kills, t: +t.toFixed(1), houseDeaths, cubes: main.cubes, maxMs: +mainDecisionMs.toFixed(1), st: ST, weapons: main.weapons.filter(Boolean).map((w) => w!.kind), opponents: roster?.map((o) => o.name), log }
 }
