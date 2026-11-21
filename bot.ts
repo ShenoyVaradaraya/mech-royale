@@ -28,7 +28,7 @@ export const DEFAULT_P = {
   grudgeS: 12,
   hostileRange: 50,
   aggressive: 0,
-  duelMargin: 0.8,
+  duelMargin: 0.6,
   kiteRange: 58,
   wanderS: 20,
   wanderAvoid: 2,
@@ -39,6 +39,9 @@ export const DEFAULT_P = {
   restHp: 0,
   dropRange: 400,
   losDodge: 1,
+  fireDiscipline: 1,
+  strayClear: 7,
+  thirdRepel: 1,
   closeRange: 35,
 }
 export type Params = typeof DEFAULT_P
@@ -46,7 +49,7 @@ export type Params = typeof DEFAULT_P
 type Track = { id: number; pos: number[]; vel: number[]; aim: number[]; hp: number; maxHp: number; weapons: string[]; charging: boolean; seen: number; vis: boolean; cubes: number }
 type Item = { id: number; pos: number[]; kind?: string; hp?: number; seen: number }
 
-const UPG_PRI = ["armor", "plating", "gun_rate", "nanites", "gun_damage", "laser_charge", "laser_damage", "lightning_damage", "lightning_range", "gun_mag", "gyros", "gun_velocity", "servos", "reactor", "capacitor", "jets", "sensors", "mortar_reload", "mortar_splash", "mortar_velocity"]
+const UPG_PRI = ["armor", "plating", "laser_damage", "gun_rate", "gun_damage", "laser_charge", "lightning_efficiency", "nanites", "gun_mag", "lightning_range", "lightning_chain", "gyros", "servos", "gun_velocity", "reactor", "capacitor", "jets", "laser_pierce", "sensors", "mortar_reload", "mortar_splash", "mortar_velocity"]
 
 export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<Params>) {
   const P: Params = { ...DEFAULT_P, ...(params ?? {}) }
@@ -328,6 +331,23 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
         if (s < tbest) { tbest = s; target = e }
       }
       lastTargetId = target ? target.id : -1
+      const hostileIds = new Set<number>()
+      for (const e of visible) if (attackedBy.has(e.id) || dist(e) < P.closeRange) hostileIds.add(e.id)
+      if (target) hostileIds.add(target.id)
+      const bystanders = visible.filter((e) => !hostileIds.has(e.id))
+      // true if a shot from us along yaw/pitch might hit a bystander
+      const strayRisk = (yaw: number, pitch: number, range: number) => {
+        if (!P.fireDiscipline) return false
+        const dx = Math.cos(pitch) * Math.cos(yaw), dy = Math.cos(pitch) * Math.sin(yaw), dz = Math.sin(pitch)
+        for (const e of bystanders) {
+          const vx = e.pos[0] - x, vy = e.pos[1] - y, vz = e.pos[2] + 4.5 - muzZ
+          const along = vx * dx + vy * dy + vz * dz
+          if (along < 0 || along > range) continue
+          const px = vx - dx * along, py = vy - dy * along, pz = vz - dz * along
+          if (Math.hypot(px, py, pz) < P.strayClear) return true
+        }
+        return false
+      }
 
       // ---- mode
       const recentlyHurt = t - lastDamagedT < 1.5
@@ -345,7 +365,8 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
       // finishing a weak close target overrides retreat
       const finish = target && target.hp < P.finishHp && dist(target) < 120 && hpF > 0.15
       mode = healing && !finish ? "retreat" : target ? "fight" : "loot"
-      if (mode === "loot" && hpF < P.restHp && obs.zone.dps * 0 === 0 && inCircle([x, y], safeCircle(obs, 10), P.zoneMargin * 0.5)) mode = "rest"
+      const npcAngry = [...npcAttack.values()].some((tt) => t - tt < 4)
+      if (mode === "loot" && !npcAngry && t - lastDamagedT > 2 && hpF < P.restHp && inCircle([x, y], safeCircle(obs, 10), P.zoneMargin * 0.5)) mode = "rest"
       if (!me.in_zone && obs.zone.dps * 3 > me.hp * 0.5) mode = "zone"
 
       // ---- movement goal
@@ -393,6 +414,11 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
         if (tLight && lightS < 0 && d < P.kiteRange) radial = -1.5
         const perp = toT + (Math.PI / 2) * strafeDir
         mv = [Math.cos(perp) + Math.cos(toT) * radial, Math.sin(perp) + Math.sin(toT) * radial]
+        // drift away from uninvolved mechs so they don't join
+        if (P.thirdRepel) for (const e of bystanders) {
+          const dd = Math.hypot(e.pos[0] - x, e.pos[1] - y)
+          if (dd < 90 && dd > 1) { const w = ((90 - dd) / 90) * 2 * P.thirdRepel; mv[0] += ((x - e.pos[0]) / dd) * w; mv[1] += ((y - e.pos[1]) / dd) * w }
+        }
         // if far and no LOS, path to it
         const losT = world.los(x, y, muzZ, target.pos[0], target.pos[1], target.pos[2] + 4.5, 1.0)
         if (!losT && d > 12) mv = goTo(obs, target.pos[0], target.pos[1], x, y, z)
@@ -574,7 +600,7 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
           aimPitch = Math.atan2(ap[2] - muzZ, Math.hypot(ap[0] - x, ap[1] - y))
           const errY = Math.abs(wrap(me.aim[0] - aimYaw)), errP = Math.abs(me.aim[1] - aimPitch)
           const tol = Math.max(0.006, 2.0 / Math.max(1, d3))
-          if (gunS >= 0 && losT && d3 < W[gunS]!.stats.range && errY < tol * 1.2 && errP < tol) {
+          if (gunS >= 0 && losT && d3 < W[gunS]!.stats.range && errY < tol * 1.2 && errP < tol && !strayRisk(me.aim[0], me.aim[1], W[gunS]!.stats.range)) {
             const g = W[gunS]!
             if ((g.ammo ?? 1) > 0 && (g.reload ?? 0) <= 0) fire[gunS] = true
           }
@@ -591,7 +617,7 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
               // keep holding until full and aimed
               const full = chg >= ls.charge - 0.02
               const tooLong = chg > ls.charge + ls.hold_s - 0.25
-              if ((full && okShot) || tooLong) fire[laserS] = false
+              if ((full && okShot && !strayRisk(me.aim[0], me.aim[1], d3 + 5)) || tooLong) fire[laserS] = false
               else fire[laserS] = true
               // laser hitscan: aim straight at target, not leading
               if (gunS < 0 || chg > ls.charge * 0.7) { aimYaw = dyaw; aimPitch = dp }
