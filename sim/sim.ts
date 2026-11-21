@@ -36,7 +36,7 @@ export function loadMap() {
 
 const clone = (o: any) => JSON.parse(JSON.stringify(o))
 
-export type MatchOpts = { seed: number; mainFactory: (hello: Hello, world: World, nav: Nav) => { act(o: Observation): any }; verbose?: boolean; houseAll?: boolean }
+export type MatchOpts = { seed: number; mainFactory: (hello: Hello, world: World, nav: Nav) => { act(o: Observation): any }; verbose?: boolean; houseAll?: boolean; duel?: number }
 
 export function runMatch(opts: MatchOpts) {
   const { world, nav } = loadMap()
@@ -657,8 +657,24 @@ export function runMatch(opts: MatchOpts) {
     }
   }
 
+  if (opts.duel !== undefined) {
+    const foe = mechs.find((m) => m.house && m.tier === opts.duel)!
+    for (const m of mechs) if (m.house && m !== foe) { m.alive = false; m.ai.placed = true; m.pos = [9999, 9999, 0] }
+    aliveCount = 2
+    // place foe 120-180 m away on open ground
+    for (let k = 0; k < 500; k++) {
+      const a = R() * 6.283, r = 120 + R() * 60
+      const q = randOk(main.pos[0] + Math.cos(a) * r, main.pos[1] + Math.sin(a) * r, 5, 3)
+      if (q) { foe.pos = q; break }
+    }
+    // give foe a random secondary
+    const ws = foe.ws
+    const kind = W[Math.floor(R() * 3)]
+    foe.weapons[1] = { kind, cooldown: 0, ammo: ws[kind].mag ?? 0, reload: 0, charge: 0, charging: false }
+    foe.ai.rank = 0
+  }
   // hunter ranks: weakest first
-  {
+  if (opts.duel === undefined) {
     const hs = mechs.filter((m) => m.house).sort((a, b) => a.tier - b.tier || a.id - b.id)
     hs.forEach((m, i) => (m.ai.rank = i))
   }
@@ -864,5 +880,6 @@ export function runMatch(opts: MatchOpts) {
     main.place = alive.indexOf(main) + 1
   }
   const houseDeaths = mechs.filter((m) => m.house && !m.alive).length
+  if (opts.duel !== undefined) return { seed: opts.seed, win: main.alive ? 1 : 0, hp: main.alive ? main.hp / main.maxHp : 0, t, foe: mechs.find((m) => m.house && m.ai.rank === 0)?.weapons[1]?.kind }
   return { seed: opts.seed, place: main.place, score: 16 - main.place, kills: main.kills, t: +t.toFixed(1), houseDeaths, cubes: main.cubes, maxMs: +mainDecisionMs.toFixed(1), st: ST, weapons: main.weapons.filter(Boolean).map((w) => w!.kind), log }
 }

@@ -7,7 +7,7 @@ import { ballisticPitch, intercept, rng, wrap } from "./geom.ts"
 export const DEFAULT_P = {
   retreatHp: 0.42, // retreat to cover below this hp fraction
   reengageHp: 0.85, // leave cover after healing to this
-  fightRange: 55, // preferred distance with gun/laser
+  fightRange: 75, // preferred distance with gun/laser
   lightRange: 28, // preferred distance with lightning
   zoneMargin: 18,
   strafeMin: 0.6,
@@ -23,7 +23,7 @@ export const DEFAULT_P = {
   coverSearch: 55,
   finishHp: 260, // keep fighting a target below this hp even when low
   fearCount: 2, // retreat earlier when this many enemies see us
-  aimLead: 1,
+  aimLead: 0.8,
   campHp: 0.0,
   grudgeS: 12,
   hostileRange: 50,
@@ -36,6 +36,9 @@ export const DEFAULT_P = {
   edgePref: 0,
   repel: 1,
   cubeCap: 99,
+  restHp: 0,
+  dropRange: 400,
+  losDodge: 1,
   closeRange: 35,
 }
 export type Params = typeof DEFAULT_P
@@ -80,6 +83,7 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
   const lastAttack = new Map<number, number>()
   const npcAttack = new Map<number, number>()
   let lastTargetId = -1
+  let dodging = -99
 
   const wscore = (k: string | undefined) => (k === "laser" ? P.laserScore : k === "lightning" ? P.lightScore : k === "mortar" ? P.mortarScore : 0)
 
@@ -341,6 +345,7 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
       // finishing a weak close target overrides retreat
       const finish = target && target.hp < P.finishHp && dist(target) < 120 && hpF > 0.15
       mode = healing && !finish ? "retreat" : target ? "fight" : "loot"
+      if (mode === "loot" && hpF < P.restHp && obs.zone.dps * 0 === 0 && inCircle([x, y], safeCircle(obs, 10), P.zoneMargin * 0.5)) mode = "rest"
       if (!me.in_zone && obs.zone.dps * 3 > me.hp * 0.5) mode = "zone"
 
       // ---- movement goal
@@ -405,7 +410,32 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
         // dodge lasers: any enemy charging aimed at us
         const danger = visible.some((e) => e.charging && Math.abs(wrap(e.aim[0] - Math.atan2(y - e.pos[1], x - e.pos[0]))) < 0.25)
         boost = !!P.boostDodge && (danger || recentlyHurt) && me.energy > (lightS >= 0 ? 35 : 20)
+        if (danger && P.losDodge) {
+          const ch = visible.filter((e) => e.charging && Math.abs(wrap(e.aim[0] - Math.atan2(y - e.pos[1], x - e.pos[0]))) < 0.25)
+          const reach = me.energy > 15 ? 9 : 5.5
+          let bestA: number[] | null = null, bd2 = Infinity
+          for (let i = 0; i < 16; i++) {
+            const a = (i / 16) * Math.PI * 2
+            const st = steer(x, y, z, Math.cos(a), Math.sin(a))
+            if (Math.abs(st[0] - Math.cos(a)) > 0.01 || Math.abs(st[1] - Math.sin(a)) > 0.01) continue
+            const px = x + Math.cos(a) * reach, py = y + Math.sin(a) * reach
+            const hidden = ch.every((e) => !visibleFrom(e.pos[0], e.pos[1], e.pos[2] + 8, px, py, z, myH))
+            if (!hidden) continue
+            const dev = Math.abs(wrap(a - Math.atan2(mv[1], mv[0])))
+            if (dev < bd2) { bd2 = dev; bestA = [Math.cos(a), Math.sin(a)] }
+          }
+          if (bestA) { mv = bestA; boost = me.energy > 5; dodging = t }
+        }
         if (tLight && lightS < 0 && d < P.kiteRange && me.energy > 5) boost = true
+      } else if (mode === "rest") {
+        const known = [...tracks.values()].filter((e) => t - e.seen < 30)
+        if (known.length) {
+          if (!cover || t - coverT > 1.5) { cover = findCover(obs, known, x, y, z, myH); coverT = t }
+          if (cover && Math.hypot(cover[0] - x, cover[1] - y) > 1.5) mv = goTo(obs, cover[0], cover[1], x, y, z)
+          let lk: Track | null = null
+          for (const e of known) if (!lk || e.seen > lk.seen) lk = e
+          if (lk) wantFace = Math.atan2(lk.pos[1] - y, lk.pos[0] - x)
+        }
       } else if (mode === "zone") {
         const g = clampToCircle([x, y], gc, P.zoneMargin)
         mv = goTo(obs, g[0], g[1], x, y, z)
@@ -486,7 +516,7 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
         if (P.dropGrab) {
           for (const dr of obs.drops) {
             const dd = Math.hypot(dr.pos[0] - x, dr.pos[1] - y)
-            if (dd < 160 && dr.lands_in < dd / 11 + 3 && (dr.holder === null || dr.holder === me_id)) {
+            if (dd < P.dropRange && dr.lands_in < dd / 11 + 3 && (dr.holder === null || dr.holder === me_id)) {
               const contested = enemies.some((e) => Math.hypot(e.pos[0] - dr.pos[0], e.pos[1] - dr.pos[1]) < 40)
               if (!contested) {
                 if (dd > dr.radius * 0.5) mv = goTo(obs, dr.pos[0], dr.pos[1], x, y, z)
