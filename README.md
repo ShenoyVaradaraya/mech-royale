@@ -28,7 +28,7 @@ All variants played the same 100 local seeds (`501–600`) with the practice ros
 
 | Variant | Mean placement points | Wins | Deaths before 60 s |
 | --- | ---: | ---: | ---: |
-| **Late zone staging and hiding (main bot)** | **6.12** | 2 | 17 |
+| Late zone staging and hiding (previous default) | 6.12 | 2 | 17 |
 | Late zone staging | 6.12 | 2 | 17 |
 | Ordinary rotation | 6.10 | 2 | 17 |
 | Closer spacing | 5.75 | 0 | 20 |
@@ -37,6 +37,20 @@ All variants played the same 100 local seeds (`501–600`) with the practice ros
 | Early zone staging | 4.40 | 1 | 33 |
 
 The main bot is below the 10.00 submission gate. The evaluation and repository are local.
+
+## Combat and recovery follow-up
+
+The development target is 9.00 placement points. After picking up a secondary, the main bot prioritizes active threats by how quickly it can neutralize them, predicts where to aim when it releases a charged laser, and seeks cover earlier when incoming damage rises. It holds cover through a reload and collects nearby cubes when the route is clear.
+
+| 100-match batch | Previous default | Cover and cube recovery throughout | Cover and cube recovery after secondary (main bot) | Main bot gain |
+| --- | ---: | ---: | ---: | ---: |
+| Seeds 701–800 | 4.70 | 5.11 | 5.02 | +0.32 |
+| Seeds 901–1000 | 4.84 | 5.39 | 5.58 | +0.74 |
+| Combined | 4.77 | 5.25 | **5.30** | **+0.53** |
+
+Across 200 matches the selected variant raised wins from 4 to 8 and reduced deaths before 60 seconds from 50 to 47.
+
+The benchmark also tracks first combat damage, first secondary weapon pickup, and first laser pickup. These measurements help distinguish a late loadout from a lost fight. [Follow-up match data](sim/followup-evaluation.json)
 
 ## Submission image
 

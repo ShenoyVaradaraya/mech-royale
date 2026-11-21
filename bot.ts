@@ -53,7 +53,7 @@ export const DEFAULT_P = {
   prepare: 0,
   escapeRoute: 0,
   fightSpacing: 0,
-  harvest: 0,
+  harvest: 1,
   opening: 0,
   fireControl: 0,
   supplyPriority: 0,
@@ -62,6 +62,12 @@ export const DEFAULT_P = {
   rangeControl: 0,
   zoneAnchor: 1,
   hideAtAnchor: 1,
+  laserTiming: 1,
+  upgradePlan: 2,
+  peekHold: 1,
+  recoverEarly: 1,
+  targetPriority: 1,
+  armedGuard: 1,
 }
 export type Params = typeof DEFAULT_P
 
@@ -69,6 +75,8 @@ type Track = { id: number; pos: number[]; vel: number[]; aim: number[]; hp: numb
 type Item = { id: number; pos: number[]; kind?: string; hp?: number; seen: number }
 
 const UPG_PRI = ["armor", "plating", "laser_damage", "gun_rate", "gun_damage", "laser_charge", "lightning_efficiency", "nanites", "gun_mag", "lightning_range", "lightning_chain", "gyros", "servos", "gun_velocity", "reactor", "capacitor", "jets", "laser_pierce", "sensors", "mortar_reload", "mortar_splash", "mortar_velocity"]
+
+const SUSTAIN_UPGRADES = ["plating", "armor", "nanites", "gun_mag", "gun_damage", "laser_damage", "servos", "gun_velocity", "laser_charge", "lightning_efficiency", "lightning_range", "gun_rate", "reactor"]
 
 export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<Params>) {
   const P: Params = { ...DEFAULT_P, ...(params ?? {}) }
@@ -107,9 +115,11 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
   let dodging = -99
   let peekCover: number[] | null = null
   let peekT = -99
+  let peekTarget = -1
   let anchor: number[] | null = null
   let anchorPhase = -1
   let anchorCheckedAt = -99
+  const guardReady = (obs: Observation) => !P.armedGuard || !!obs.self.weapons[1]
 
   const wscore = (k: string | undefined) => (k === "laser" ? P.laserScore : k === "lightning" ? P.lightScore : k === "mortar" ? P.mortarScore : 0)
 
@@ -319,10 +329,12 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
 
   function pickUpgrade(obs: Observation): number {
     const ch = obs.offer!.choices
+    const preferred = P.upgradePlan && guardReady(obs) ? SUSTAIN_UPGRADES : UPG_PRI
     let bi = 0, bp = 999
     ch.forEach((c, i) => {
-      const p = UPG_PRI.indexOf(c.id)
-      const pp = p < 0 ? 50 : p
+      const priority = preferred.indexOf(c.id)
+      const fallback = UPG_PRI.indexOf(c.id)
+      const pp = priority >= 0 ? priority : fallback >= 0 ? preferred.length + fallback : 50
       if (pp < bp) { bp = pp; bi = i }
     })
     return bi
@@ -369,14 +381,14 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
       for (const e of obs.events) {
         if (e.type === "damaged" && e.by !== null) {
           lastDamagedT = t
-          if (P.survival && e.by < 16) recentDamage.push({ amount: e.amount, t })
+          if ((P.survival || P.recoverEarly) && e.by < 16) recentDamage.push({ amount: e.amount, t })
           if (e.by < 100) lastAttack.set(e.by, t)
           else npcAttack.set(e.by, t)
           if (e.bearing !== null) dmgBearings.push({ b: e.bearing, t, by: e.by })
         } else if (e.type === "damaged") {
           // zone damage: does not count as combat for our logic
         } else if (e.type === "take_failed") failedTake.set(e.id, t)
-        else if (e.type === "kill" && P.harvest) {
+        else if (e.type === "kill" && P.harvest && guardReady(obs)) {
           const defeated = tracks.get(e.target)
           if (defeated) freshSalvage = { pos: defeated.pos, until: t + 7 }
           tracks.delete(e.target)
@@ -385,7 +397,7 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
       }
       if (freshSalvage && t > freshSalvage.until) freshSalvage = null
       dmgBearings = dmgBearings.filter((d) => t - d.t < 4)
-      if (P.survival) recentDamage = recentDamage.filter((d) => t - d.t <= 1.2)
+      if (P.survival || P.recoverEarly) recentDamage = recentDamage.filter((d) => t - d.t <= 1.2)
 
       // ---- upgrades
       if (obs.offer) act.pick = pickUpgrade(obs)
@@ -431,6 +443,8 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
         return v * (1 + 0.04 * Math.min(10, cubesN))
       }
       const myW = W.filter(Boolean).map((w) => w!.kind) as string[]
+      const useGuard = guardReady(obs)
+      const recoverEarly = P.recoverEarly && useGuard
       let target: Track | null = null
       let tbest = Infinity
       for (const e of visible) {
@@ -447,6 +461,16 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
         const want = holdingCover ? hostile && losOk : hostile || weak || goodOpening || (P.aggressive && hpF > 0.8 && visible.length === 1)
         if (!want) continue
         let s = d / 40 + e.hp / 400 + (losOk ? 0 : 4) - (attackedBy.has(e.id) ? 1 : 0)
+        if (P.targetPriority && useGuard) {
+          const toEnemy = Math.atan2(e.pos[1] - y, e.pos[0] - x)
+          const swivel = Math.abs(wrap(me.aim[0] - toEnemy)) / (me.stats.turn_rate ?? C.mech.turn_rate)
+          const danger = dpsOf(e.weapons, d, e.cubes) * (facing ? 1 : 0.35)
+          const ability = dpsOf(myW, d, me.cubes)
+          const health = Math.max(1, e.hp)
+          const removalTime = health / Math.max(35, ability) + swivel + (losOk ? 0 : 4)
+          const defenseValue = Math.min(6, danger / 110) * (attackedBy.has(e.id) || facing && d < 65 ? 1 : 0.5)
+          s = removalTime / (1 + defenseValue * 0.35) + (hostile ? 0 : 1.4)
+        }
         if (e.id === lastTargetId) s -= 0.7
         if (s < tbest) { tbest = s; target = e }
       }
@@ -475,23 +499,26 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
       let incoming = 0
       for (const e of visible) if (attackedBy.has(e.id) || seeingMe.includes(e)) incoming += dpsOf(e.weapons, dist(e), e.cubes)
       const myArmor = me.stats.armor ?? 0
-      const observedDps = P.survival ? recentDamage.reduce((sum, hit) => sum + hit.amount, 0) / 1.2 : 0
+      const observedDps = P.survival || recoverEarly ? recentDamage.reduce((sum, hit) => sum + hit.amount, 0) / 1.2 : 0
       const ttdMe = me.hp / Math.max(1, incoming * (1 - myArmor), observedDps)
       const ttkT = target ? target.hp / Math.max(1, dpsOf(myW, dist(target), me.cubes)) : Infinity
       const winning = target !== null && ttkT < ttdMe * P.duelMargin
-      const activeAttackers = P.survival ? visible.filter((e) => t - (lastAttack.get(e.id) ?? -99) < 3).length : 0
+      const activeAttackers = P.survival || recoverEarly ? visible.filter((e) => t - (lastAttack.get(e.id) ?? -99) < 3).length : 0
       const pressured = P.survival && (activeAttackers >= 2 && hpF < 0.84 || observedDps > 180 && ttdMe < 4.2)
       const disengage = P.survival >= 3 && target !== null && !winning && me.in_zone &&
         (activeAttackers > 1 || target.weapons.includes("lightning") && lightS < 0 && dist(target) < 52 ||
           P.survival >= 4 && !W[1] && dist(target) < 75 && !recentlyHurt)
       const fearful = (hpF < P.retreatHp && !winning) || (seeingMe.length >= P.fearCount && hpF < 0.7 && !winning) || (hpF < 0.2 && ttkT > 1.5) || pressured
+      const shortRetreat = recoverEarly && target && me.in_zone && hpF < (P.recoverEarly > 1 ? 0.85 : 0.72) &&
+        (activeAttackers > 1 && observedDps > 100 || observedDps > 190 && ttdMe < 4.5) && ttkT > Math.min(ttdMe, 2.5)
       if (healing && (hpF >= P.reengageHp || enemies.length === 0 && hpF > 0.7)) healing = false
       if ((fearful || (P.battleRoyale && incoming > 240 && hpF < 0.78 && !winning)) && enemies.length > 0) healing = true
-      if (healing && winning && hpF > (P.survival ? 0.5 : 0.25) && !pressured) healing = false
+      if (shortRetreat) healing = true
+      if (healing && winning && hpF > (P.survival ? 0.5 : 0.25) && !pressured && !shortRetreat) healing = false
       // finishing a weak close target overrides retreat
       const finish = target && target.hp < P.finishHp && dist(target) < 120 && hpF > 0.15 &&
         (!P.survival || ttdMe > Math.max(1.5, ttkT * 2) && activeAttackers < 3)
-      mode = (healing || disengage) && !finish ? "retreat" : target ? "fight" : "loot"
+      mode = shortRetreat || (healing || disengage) && !finish ? "retreat" : target ? "fight" : "loot"
       const npcAngry = [...npcAttack.values()].some((tt) => t - tt < 4)
       if (mode === "loot" && !npcAngry && t - lastDamagedT > 2 && hpF < P.restHp && inCircle([x, y], safeCircle(obs, 10), P.zoneMargin * 0.5)) mode = "rest"
       if (holdingCover && !npcAngry && (mode === "loot" || mode === "rest")) mode = "hide"
@@ -521,14 +548,15 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
       let staging = false
 
       if (mode === "retreat") {
-        const threats = enemies
+        const attackers = recoverEarly ? enemies.filter((e) => attackedBy.has(e.id) || seeingMe.includes(e) || e === target) : []
+        const threats = attackers.length ? attackers : enemies
         const concealed = P.safePlay && !seeingMe.length && inCircle([x, y], sc, 6) &&
           threats.every((e) => !visibleFrom(e.pos[0], e.pos[1], e.pos[2] + 8, x, y, z, myH))
         if (concealed) {
           cover = [x, y]
           coverT = t
         } else if (P.safePlay ? t - coverT > 0.8 : !cover || t - coverT > 0.8) {
-          cover = findCover(obs, threats, x, y, z, myH)
+          cover = findCover(obs, threats, x, y, z, myH, shortRetreat ? 30 : P.coverSearch)
           coverT = t
         }
         if (cover) {
@@ -629,9 +657,17 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
           const reloading = (g.reload ?? 0) > 0.4 || (g.ammo ?? 1) <= 0
           const laserReady = laserS >= 0 && W[laserS]!.cooldown <= 0.3
           const lightReady = lightS >= 0 && d < 45 && me.energy > 10
-          if (reloading && !laserReady && !lightReady && losT) {
-            if (!peekCover || t - peekT > 1.0) { peekCover = findCover(obs, [target], x, y, z, myH, P.peekR); peekT = t }
-            if (peekCover) mv = goTo(obs, peekCover[0], peekCover[1], x, y, z)
+          const holdPeek = P.peekHold && useGuard
+          if (reloading && !laserReady && !lightReady && (losT || holdPeek && peekTarget === target.id)) {
+            if (!peekCover || t - peekT > 1.0 && (!holdPeek || losT) || holdPeek && peekTarget !== target.id) {
+              peekCover = findCover(obs, [target], x, y, z, myH, P.peekR)
+              peekT = t
+              peekTarget = target.id
+            }
+            if (peekCover && (!holdPeek || d > 23 && inCircle(peekCover, sc, 5))) {
+              const reached = holdPeek && Math.hypot(peekCover[0] - x, peekCover[1] - y) < 1.8
+              mv = reached ? [0, 0] : goTo(obs, peekCover[0], peekCover[1], x, y, z)
+            }
           }
         }
         // dodge lasers: any enemy charging aimed at us
@@ -790,7 +826,7 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
         }
       }
 
-      if (P.harvest && (mode === "fight" || mode === "loot") && me.in_zone && hpF > 0.45 &&
+      if (P.harvest && useGuard && (mode === "fight" || mode === "loot") && me.in_zone && hpF > 0.45 &&
           me.cubes < P.cubeCap && seeingMe.length < 2 && (!target || dist(target) > 48)) {
         let salvage: Item | null = null
         let salvageCost = Infinity
@@ -904,19 +940,30 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
             const L = W[laserS]!
             const ls = L.stats
             const chg = L.charge ?? 0
-            const dyaw = Math.atan2(tp[1] - y, tp[0] - x)
-            const dp = Math.atan2(tp[2] - muzZ, Math.hypot(tp[0] - x, tp[1] - y))
+            const laserTiming = P.laserTiming && useGuard
+            const launchDelay = laserTiming ? 1 / C.match.tick_hz : 0
+            const dx = tp[0] - x + (tv[0] - me.vel[0]) * launchDelay
+            const dy = tp[1] - y + (tv[1] - me.vel[1]) * launchDelay
+            const dz = tp[2] - muzZ + (tv[2] - me.vel[2]) * launchDelay
+            const dyaw = Math.atan2(dy, dx)
+            const dp = Math.atan2(dz, Math.hypot(dx, dy))
             const ey = Math.abs(wrap(me.aim[0] - dyaw)), ep = Math.abs(me.aim[1] - dp)
             const ltol = Math.max(0.005, 1.6 / Math.max(1, d3))
-            const okShot = losT && d3 < ls.range && ey < ltol && ep < ltol * 1.5
+            const yawSweep = launchDelay * (me.stats.turn_rate ?? C.mech.turn_rate) * 0.78
+            const pitchSweep = launchDelay * (me.stats.pitch_rate ?? C.mech.pitch_rate) * 0.78
+            const okShot = losT && d3 < ls.range && ey < ltol + yawSweep && ep < ltol * 1.5 + pitchSweep &&
+              (!laserTiming || dp >= C.mech.min_pitch && dp <= C.mech.max_pitch)
             if (chg > 0) {
               // keep holding until full and aimed
-              const damageSeconds = (target.hp / ls.damage - ls.min_frac) / (1 - ls.min_frac) * ls.charge
-              const releaseAt = P.fightSpacing && damageSeconds < ls.charge * 0.9
-                ? Math.max(ls.min_charge, damageSeconds * 1.15, ls.charge * 0.5) : ls.charge
-              const full = chg >= releaseAt - 0.02
+              const cubeDamage = 1 + Number(C.cubes.damage_per_cube) * Math.min(me.cubes, Number(C.cubes.stat_cap))
+              const damage = laserTiming ? ls.damage * cubeDamage : ls.damage
+              const damageSeconds = (target.hp / damage - ls.min_frac) / (1 - ls.min_frac) * ls.charge
+              const standardCharge = ls.charge
+              const releaseAt = (P.fightSpacing || laserTiming) && damageSeconds < standardCharge * 0.9
+                ? Math.min(standardCharge, Math.max(ls.min_charge, damageSeconds * 1.15, ls.charge * 0.5)) : standardCharge
+              const full = chg + launchDelay >= releaseAt - 0.02
               const tooLong = chg > ls.charge + ls.hold_s - 0.25
-              if ((full && okShot && !strayRisk(me.aim[0], me.aim[1], d3 + 5)) || tooLong) fire[laserS] = false
+              if ((full && okShot && !strayRisk(laserTiming ? dyaw : me.aim[0], laserTiming ? dp : me.aim[1], d3 + 5)) || tooLong) fire[laserS] = false
               else fire[laserS] = true
               // laser hitscan: aim straight at target, not leading
               if (gunS < 0 || chg > releaseAt * 0.7) { aimYaw = dyaw; aimPitch = dp }

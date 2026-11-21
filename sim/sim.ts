@@ -126,7 +126,13 @@ export function runMatch(opts: MatchOpts) {
     })
   }
   const main = mechs[mainSlot]
-  const ST = { shots: 0, gunHits: 0, dealt: 0, taken: 0, laserShots: 0, laserHits: 0, takenBy: {} as Record<string, number>, deathNear: 0, killerTier: null as any, deathHunters: 0 }
+  const ST = {
+    shots: 0, gunHits: 0, dealt: 0, taken: 0, laserShots: 0, laserHits: 0,
+    takenBy: {} as Record<string, number>, deathNear: 0, killerTier: null as any, deathHunters: 0,
+    firstCombatDamageAt: null as number | null,
+    firstSecondaryAt: null as number | null,
+    firstLaserAt: null as number | null,
+  }
   // ---- loot, crates, npcs
   const W = ["mortar", "laser", "lightning"]
   for (let i = 0; i < C.loot.floor_count; i++) { const p = randOk(Z.start_center[0], Z.start_center[1], Z.start_radius * 0.85); if (p) picks.push({ id: nextId.pick++, kind: W[Math.floor(R() * 3)], pos: p }) }
@@ -221,7 +227,12 @@ export function runMatch(opts: MatchOpts) {
     }
     m.hp -= a
     m.combatT = t
-    if (m === main) { ST.taken += a; const k = weapon + (att ? ':t' + att.tier : ''); ST.takenBy[k] = (ST.takenBy[k] ?? 0) + a }
+    if (m === main) {
+      ST.taken += a
+      const key = weapon + (att ? ':t' + att.tier : '')
+      ST.takenBy[key] = (ST.takenBy[key] ?? 0) + a
+      if (weapon !== "zone" && by !== m.id) ST.firstCombatDamageAt ??= +t.toFixed(1)
+    }
     if (by === main.id && m !== main) { ST.dealt += a; if (weapon === 'gun') ST.gunHits++; if (weapon === 'laser') ST.laserHits++ }
     if (att && by !== m.id) { att.combatT = t; att.events.push({ type: "hit", target: m.id, amount: +a.toFixed(2), weapon, ...(rear ? { rear } : {}) }) }
     const bearing = weapon === "zone" ? null : +Math.atan2(from[1] - m.pos[1], from[0] - m.pos[0]).toFixed(3)
@@ -746,6 +757,8 @@ export function runMatch(opts: MatchOpts) {
               const ws = m.ws[p.kind]
               m.weapons[slot] = p.wpn ? { ...p.wpn, charging: false, charge: 0 } : { kind: p.kind, cooldown: 0, ammo: ws.mag ?? 0, reload: 0, charge: 0, charging: false }
               m.equipUntil[slot] = t + Math.max(C.loot.equip_s, ws.cooldown ?? 0)
+              if (m === main && p.kind !== "gun") ST.firstSecondaryAt ??= +t.toFixed(1)
+              if (m === main && p.kind === "laser") ST.firstLaserAt ??= +t.toFixed(1)
               m.events.push({ type: "took", id: p.id, kind: p.kind, slot })
             }
           }

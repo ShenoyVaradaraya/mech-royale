@@ -6,7 +6,10 @@ import { runMatch } from "./sim.ts"
 
 type Variant = { name: string; params: Partial<Params> & { example?: boolean } }
 type Job = { variant: Variant; seed: number }
-type Result = { variant: string; seed: number; score: number; t: number; kills: number; maxMs: number; slot: number; opponents: string[] }
+type Result = {
+  variant: string; seed: number; score: number; t: number; kills: number; maxMs: number; slot: number; opponents: string[]
+  st: { firstCombatDamageAt: number | null; firstSecondaryAt: number | null; firstLaserAt: number | null }
+}
 const roster = process.env.BENCH_ROSTER === "mixed" ? "mixed" : "practice"
 const submissionTarget = 10
 const evaluationMatches = 100
@@ -74,8 +77,12 @@ if (!isMainThread) {
     const worst = Math.min(...scores), best = Math.max(...scores)
     const wins = scores.filter((score) => score === 15).length
     const earlyDeaths = runs.filter((r) => r.t < 60 && r.score < 15).length
+    const beforeContact = runs.filter(({ st }) => st.firstSecondaryAt !== null &&
+      (st.firstCombatDamageAt === null || st.firstSecondaryAt < st.firstCombatDamageAt)).length
+    const earlyLaser = runs.filter(({ st }) => st.firstLaserAt !== null && st.firstLaserAt < 60).length
     const gate = count === evaluationMatches && roster === "practice" ? `  target ${submissionTarget.toFixed(2)} ${average >= submissionTarget ? "met" : "unmet"}` : ""
     console.log(`${name.padEnd(14)} mean ${average.toFixed(2)}  paired Δ ${delta >= 0 ? "+" : ""}${delta.toFixed(2)}  range ${worst}–${best}  bottom quartile ${mean(tail).toFixed(2)}  wins ${wins}/${count}  early deaths ${earlyDeaths}/${count}  life ${mean(runs.map((r) => r.t)).toFixed(0)}s${gate}`)
+    console.log(`  Secondaries before damage ${beforeContact}/${count}  laser before 60s ${earlyLaser}/${count}`)
     if (process.env.BENCH_RAW === "1") for (const run of runs) console.log(JSON.stringify(run))
   }
 }
