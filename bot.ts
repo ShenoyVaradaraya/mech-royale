@@ -79,7 +79,7 @@ export const DEFAULT_P = {
   standEnergy: 25,
   standR: 75,
   ghost: 1, // survival mode: after ghostT never start fights, hide concealed in the next circle, move silently
-  ghostT: 70,
+  ghostT: 360, // phase 5 starts at 350 s: from here only HP at the final collapse matters
   ghostQuiet: 70,
   trees: 1, // model tree concealment in our own visibility checks (cover, hiding, MRM)
   detailR: 140,
@@ -236,11 +236,12 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
     const [x, y, z] = obs.self.pos
     const [cx, cy] = obs.zone.next_center
     const radius = obs.zone.next_radius
-    const extent = P.ghost ? Math.min(120, radius * 0.55) : Math.min(40, radius * 0.32)
+    const ghosting = P.ghost && obs.t > P.ghostT
+    const extent = ghosting ? Math.min(120, radius * 0.55) : Math.min(40, radius * 0.32)
     let best: number[] | null = null
     let bestScore = Infinity
-    for (const fraction of P.ghost ? [0, 0.25, 0.5, 0.75, 1] : [0, 0.45, 0.75, 1]) {
-      const steps = fraction === 0 ? 1 : P.ghost ? 12 : 8
+    for (const fraction of ghosting ? [0, 0.25, 0.5, 0.75, 1] : [0, 0.45, 0.75, 1]) {
+      const steps = fraction === 0 ? 1 : ghosting ? 12 : 8
       for (let i = 0; i < steps; i++) {
         const angle = i * 2 * Math.PI / steps
         const px = cx + Math.cos(angle) * extent * fraction
@@ -249,7 +250,7 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
         if (cell < 0 || !nav.ok[cell]) continue
         const floor = nav.s[cell]
         if (floor > world.ground(px, py) + 2) continue
-        let score = Math.hypot(px - x, py - y) * 0.16 + extent * fraction * (P.ghost ? 0.15 : 0.6) + Math.abs(floor - z) * 0.3
+        let score = Math.hypot(px - x, py - y) * 0.16 + extent * fraction * (ghosting ? 0.15 : 0.6) + Math.abs(floor - z) * 0.3
         for (const e of enemies) {
           const d = Math.hypot(px - e.pos[0], py - e.pos[1])
           if (d < 105 && visibleFrom(e.pos[0], e.pos[1], e.pos[2] + 8, px, py, floor, C.mech.height)) score += (105 - d) * 0.65
@@ -257,8 +258,8 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
         for (let step = 0; step < 8; step++) {
           const bearing = step * Math.PI / 4
           const ax = px + Math.cos(bearing) * 28, ay = py + Math.sin(bearing) * 28
-          if (world.los(ax, ay, world.ground(ax, ay) + 7, px, py, floor + 4.5, 1.5) && (!P.trees || world.treeClear(ax, ay, world.ground(ax, ay) + 8, px, py, floor + 4.5))) score += P.ghost ? 9 : P.hideAtAnchor ? 5 : 2.2
-          if (P.ghost) {
+          if (world.los(ax, ay, world.ground(ax, ay) + 7, px, py, floor + 4.5, 1.5) && (!P.trees || world.treeClear(ax, ay, world.ground(ax, ay) + 8, px, py, floor + 4.5))) score += ghosting ? 9 : P.hideAtAnchor ? 5 : 2.2
+          if (ghosting) {
             const fx = px + Math.cos(bearing) * 70, fy = py + Math.sin(bearing) * 70
             if (world.los(fx, fy, world.ground(fx, fy) + 8, px, py, floor + 4.5, 2) && (!P.trees || world.treeClear(fx, fy, world.ground(fx, fy) + 8, px, py, floor + 4.5))) score += 4
           }
