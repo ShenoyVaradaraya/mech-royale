@@ -28,7 +28,7 @@ export const DEFAULT_P = {
   grudgeS: 12,
   hostileRange: 50,
   aggressive: 0,
-  duelMargin: 0.6,
+  duelMargin: 1.0,
   kiteRange: 68,
   wanderS: 20,
   wanderAvoid: 2,
@@ -68,6 +68,9 @@ export const DEFAULT_P = {
   recoverEarly: 1,
   targetPriority: 1,
   armedGuard: 1,
+  npcRepel: 0,
+  crateCalm: 0,
+  preReload: 0,
 }
 export type Params = typeof DEFAULT_P
 
@@ -631,6 +634,12 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
         if (escapingArc) radial = d < enemyArc + 5 ? -3 : -1.8
         const lateral = escapingArc && d < enemyArc + 5 ? 0.45 : P.rangeControl && d < pref - 24 ? 0.7 : 1
         mv = [Math.cos(perp) * lateral + Math.cos(toT) * radial, Math.sin(perp) * lateral + Math.sin(toT) * radial]
+        // drift away from drones shooting at us / that would aggro
+        if (P.npcRepel) for (const n of npcs.values()) {
+          const dd = Math.hypot(n.pos[0] - x, n.pos[1] - y)
+          const angryN = t - (npcAttack.get(n.id) ?? -99) < 4
+          if ((angryN && dd < 90) || dd < 50) { const w = (angryN ? 2.5 : 1.2) * P.npcRepel * Math.max(0.3, (90 - dd) / 90); mv[0] += ((x - n.pos[0]) / Math.max(1, dd)) * w; mv[1] += ((y - n.pos[1]) / Math.max(1, dd)) * w }
+        }
         // drift away from uninvolved mechs so they don't join
         if (P.thirdRepel) for (const e of bystanders) {
           const dd = Math.hypot(e.pos[0] - x, e.pos[1] - y)
@@ -650,6 +659,11 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
           const ml0 = Math.hypot(mv[0], mv[1]) || 1
           if ((st[0] * mv[0] + st[1] * mv[1]) / ml0 < 0.2 && t > strafeUntil - (P.strafeMax - 0.3)) { strafeDir = -strafeDir; strafeUntil = t + P.strafeMin }
           mv = st
+        }
+        // top up the magazine before the enemy is in range
+        if (P.preReload && gunS >= 0) {
+          const g = W[gunS]!
+          if ((g.reload ?? 0) <= 0 && (g.ammo ?? 12) < g.stats.mag * 0.6 && d > 160 && !recentlyHurt) act.reload = true
         }
         // peek fighting: hide during reload when nothing else can fire
         if (P.peek && gunS >= 0 && !escapingArc) {
@@ -999,9 +1013,11 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
         if (mode === "loot" && !staging && gunS >= 0 && !(P.prepare > 1 && t < 2.3)) {
           let best: { pos: number[]; h: number } | null = lootCrate ? { pos: (lootCrate as Item).pos, h: 1.2 } : null
           let bd = lootCrate ? dist(lootCrate) : Infinity
+          const enemyNearC = P.crateCalm && [...tracks.values()].some((e) => t - e.seen < 8 && Math.hypot(e.pos[0] - x, e.pos[1] - y) < 220)
+          if (enemyNearC) best = null
           for (const c of crates.values()) {
-            if (lootCrate) break
-            if (t - c.seen > 0.5) continue
+            if (lootCrate && !enemyNearC) break
+            if (t - c.seen > 0.5 || enemyNearC) continue
             const d = Math.hypot(c.pos[0] - x, c.pos[1] - y)
             if (d < P.crateRadius && d < bd && world.los(x, y, muzZ, c.pos[0], c.pos[1], c.pos[2] + 1.2, 0.8)) { bd = d; best = { pos: c.pos, h: 1.2 } }
           }
