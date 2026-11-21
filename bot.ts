@@ -78,15 +78,15 @@ export const DEFAULT_P = {
   standFight: 0, // max enemies within 120 m for which we stand and fight instead of fleeing a chaser
   standEnergy: 25,
   standR: 75,
-  ghost: 0, // survival mode: after ghostT never start fights, hide concealed in the next circle, move silently
-  ghostT: 360, // phase 5 starts at 350 s: from here only HP at the final collapse matters
+  ghost: 1, // survival mode: after ghostT never start fights, hide concealed in the next circle, move silently
+  ghostT: 20, // phase 5 starts at 350 s: from here only HP at the final collapse matters
   ghostQuiet: 70,
   budgetMs: 25, // per-decision time budget for optional searches (limit is 50 ms on 1 CPU)
   killCleanup: 1, // always forget a mech we killed
   laserCounter: 0, // no laser/lightning: break LOS from laser carriers; with lightning: close in to short them; dodge charging lasers in any mode
   preempt: 0, // treat enemies aiming at us (clear line, <230 m) as hostile
   spin: 0, // idle look-around: rotate the torso continuously when no enemy is known
-  trees: 0, // model tree concealment in our own visibility checks (cover, hiding, MRM)
+  trees: 1, // model tree concealment in our own visibility checks (cover, hiding, MRM)
   detailR: 140,
   detailGap: 35,
 }
