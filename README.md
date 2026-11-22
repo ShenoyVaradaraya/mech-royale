@@ -1,5 +1,19 @@
 # Mech Royale bot
 
+## What the image runs
+
+The top-level `Dockerfile` runs **Corner Runner**, a Python bot by the Corner Runner contributors, used under the MIT License (see [`LICENSE.corner-runner`](LICENSE.corner-runner)). The files `bot.py`, `arena.py`, `lead_model.py` and `mechfight.py` are copied unchanged from [lalitaditya/corner-runner](https://github.com/lalitaditya/corner-runner) branch `python-v12`, commit `183dd6176feaa391efda0aee3634d5e710b32c66`. Any changes we make to them will be listed here.
+
+| File | Change |
+| --- | --- |
+| (none yet) | |
+
+The TypeScript bot below (`bot.ts` and friends) is our earlier entry. It stays in the repository but is not built into the image.
+
+---
+
+# Mech Royale bot
+
 A TypeScript entry for Builders Mech Royale. The main bot reads live game observations and the arena map. Its movement, aim, and loot decisions are independent of the `hello.seed` field.
 
 ## Local evaluation

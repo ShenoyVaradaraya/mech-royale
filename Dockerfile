@@ -1,6 +1,4 @@
-FROM oven/bun:1.4.4-slim
+FROM python:3.13-slim@sha256:e48f59cdba69a3cbd9ed2cf0f348d90d45a8d350d98134cf1070bc106ee9ed90
 WORKDIR /bot
-COPY bot.ts geom.ts main.ts mechfight.ts nav.ts package.json world.ts ./
-COPY arena ./arena
-USER 65534:65534
-ENTRYPOINT ["bun", "/bot/main.ts"]
+COPY arena.py bot.py lead_model.py mechfight.py ./
+ENTRYPOINT ["python3", "-B", "-u", "/bot/bot.py"]
