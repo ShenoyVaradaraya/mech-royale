@@ -20,7 +20,6 @@ type StrategyProfile = "auto" | "practice_swarm" | "royale_ffa" | "voronoi_ghost
 
 export interface BotParams {
   profile: StrategyProfile;
-  budgetMs: number;
 
   // Survival & 5s Regen Firewall
   retreatHp: number;
@@ -67,7 +66,6 @@ export interface BotParams {
 
 const DEFAULT_P: BotParams = {
   profile: "auto",
-  budgetMs: 4.0,
 
   retreatHp: 0.48,
   reengageHp: 0.85,
@@ -134,6 +132,7 @@ const UPGRADE_RANK = new Map<string, number>([
 
 const TAU = Math.PI * 2;
 const HALF_PI = Math.PI * 0.5;
+const MAX_COVER_RINGS = 12;
 const COS16 = new Float64Array(16);
 const SIN16 = new Float64Array(16);
 for (let i = 0; i < 16; i++) {
@@ -319,8 +318,7 @@ export class Bot {
   static readonly botName = "Apex-ZeroLatency-Hybrid";
 
   private P: BotParams;
-  private noBudget: boolean;
-  private tickStart = 0.0;
+  private readonly logDecisions: boolean;
 
   private C: Config;
   private rng: SeededRng;
@@ -373,7 +371,7 @@ export class Bot {
 
   constructor(hello: Hello, world: World, nav: Nav, params?: Partial<BotParams>) {
     this.P = { ...DEFAULT_P, ...(params ?? {}) };
-    this.noBudget = Boolean(process.env.MECH_NO_BUDGET);
+    this.logDecisions = !process.env.MECH_NO_BUDGET;
 
     this.C = hello.config;
     this.rng = new SeededRng(Number(hello.seed ?? 1) || 1);
@@ -382,15 +380,6 @@ export class Bot {
     this.activeRegime =
       this.P.profile === "auto" ? "practice_swarm" : this.P.profile;
     this.scanPhase = this.rng.next() * TAU;
-  }
-
-  private elapsedMs(): number {
-    return performance.now() - this.tickStart;
-  }
-
-  private overBudget(reserveMs = 0.0): boolean {
-    if (this.noBudget) return false;
-    return this.elapsedMs() > this.P.budgetMs - reserveMs;
   }
 
   private weaponScore(kind?: string): number {
@@ -655,8 +644,9 @@ export class Bot {
     let best: Vec2 | null = null;
     let bs = Infinity;
 
-    for (let rad = 8.0; rad <= maxR; rad += 8.0) {
-      if (this.overBudget(1.0)) break;
+    const rings = Math.min(MAX_COVER_RINGS, Math.floor(maxR / 8.0));
+    for (let ring = 1; ring <= rings; ring++) {
+      const rad = ring * 8.0;
       for (let a = 0; a < 10; a++) {
         const ang = (a / 10.0) * TAU + rad * 0.37;
         const px = x + Math.cos(ang) * rad;
@@ -769,7 +759,6 @@ export class Bot {
     const extent = Math.min(68.0, radius * 0.78);
     const fractions = useRim ? [0.65, 0.82] : [0.0, 0.45, 0.78];
     for (const fraction of fractions) {
-      if (this.overBudget(1.0) && best !== null) break;
       const steps = fraction === 0.0 ? 1 : 8;
       for (let i = 0; i < steps; i++) {
         const angle = useRim ? antiAngle + (i - 4) * 0.35 : (i * TAU) / steps;
@@ -903,7 +892,8 @@ export class Bot {
   }
 
   act(obs: Observation): Action {
-    this.tickStart = performance.now();
+    const reportTiming = this.logDecisions && obs.tick % 20 === 0;
+    const tickStart = reportTiming ? performance.now() : 0;
     this.losCache.clear();
 
     const t = Number(obs.t);
@@ -1866,7 +1856,7 @@ export class Bot {
           0.25 &&
         this.visibleFrom(e.pos[0], e.pos[1], e.pos[2] + 8.0, x, y, z, myH)
     );
-    if (chargingLasers.length > 0 && !this.overBudget(0.6)) {
+    if (chargingLasers.length > 0) {
       const reachD = me.energy > 15.0 ? 9.0 : 5.5;
       let bestDodge: Vec2 | null = null;
       let bestDev = Infinity;
@@ -2234,9 +2224,9 @@ export class Bot {
     ];
     action.fire = fire;
 
-    if (!this.noBudget && obs.tick % 20 === 0) {
+    if (reportTiming) {
       log(
-        `${this.activeRegime}:${this.mode} | hp:${Math.round(me.hp)} | c:${me.cubes} | ${this.elapsedMs().toFixed(2)}ms`
+        `${this.activeRegime}:${this.mode} | hp:${Math.round(me.hp)} | c:${me.cubes} | ${(performance.now() - tickStart).toFixed(2)}ms`
       );
     }
     return action;

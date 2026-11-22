@@ -14,7 +14,7 @@ npm run check
 npm run benchmark
 ```
 
-`npm run check` exercises Apex through the live protocol. The verification and benchmark scripts use the C4 policy in `bot.ts`. The results below record earlier policy experiments.
+`npm run check` exercises Apex through the live protocol. `npm run verify` checks Apex's actions under different CPU timings and verifies the earlier C4 policy. The benchmark uses C4, and the results below record earlier policy experiments.
 
 The benchmark defaults to seeds 1–100 and copies the simulator, configuration, and arena from `../builders/bot` into a temporary directory. The fixed house-bot tiers and hunter behavior follow that folder's `sim/eval.ts`. Set `BENCH_HARNESS` to a different checkout when needed. `BENCH_HARNESS=local` uses the simulator in this repository. Set `BENCH_RAW=1` to include each match’s result.
 

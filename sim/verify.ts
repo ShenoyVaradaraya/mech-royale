@@ -1,6 +1,7 @@
 import assert from "node:assert/strict"
 import { readFileSync } from "node:fs"
 import { gunzipSync } from "node:zlib"
+import { makeBot as makeApex } from "../apex-bot.ts"
 import { makeBot } from "../bot.ts"
 import { rng } from "../geom.ts"
 import type { Hello, Observation } from "../mechfight.ts"
@@ -83,3 +84,28 @@ hide.act(staging)
 assert.ok(["fight", "retreat"].includes(hide.debugMode()))
 
 console.log(`PASS · ${observations.length} seed-independent actions · 16 profiles · final rotation · quiet cover and reaction to damage`)
+
+function replayApexWithClock(stepMs: number) {
+  let now = 0
+  const originalNow = performance.now
+  const originalError = console.error
+  const originalNoBudget = process.env.MECH_NO_BUDGET
+  delete process.env.MECH_NO_BUDGET
+  performance.now = () => (now += stepMs)
+  console.error = () => {}
+  try {
+    const bot = makeApex(hello, world, nav)
+    return observations.map(observation => bot.act(observation))
+  } finally {
+    performance.now = originalNow
+    console.error = originalError
+    if (originalNoBudget !== undefined) process.env.MECH_NO_BUDGET = originalNoBudget
+  }
+}
+
+const fastApex = replayApexWithClock(0.01)
+const slowApex = replayApexWithClock(10)
+for (let i = 0; i < observations.length; i++) {
+  assert.deepEqual(slowApex[i], fastApex[i], `Apex action changed with the clock at tick ${observations[i].tick}`)
+}
+console.log(`PASS · ${observations.length} Apex actions identical under fast and slow clocks`)
