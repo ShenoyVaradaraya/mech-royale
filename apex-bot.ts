@@ -1349,6 +1349,7 @@ export class Bot {
     let boost = false;
     let jump = false;
     let wantFace: number | null = null;
+    let lootAimPitch = 0.0;
 
     const [gc, gr] = this.goalCircle(obs, x, y);
     const [sc, sr] = this.safeCircle(obs, 5.0);
@@ -1810,10 +1811,12 @@ export class Bot {
         const dObj = Math.hypot(tx - x, ty - y);
         if (this.arena.clear(x, y, muzZ, tx, ty, tz)) {
           wantFace = Math.atan2(ty - y, tx - x);
+          lootAimPitch = Math.atan2(tz - muzZ, dObj);
           const g = W[gunS];
           if (
             g !== null &&
             Math.abs(wrap(me.aim[0] - wantFace)) < 0.08 &&
+            Math.abs(me.aim[1] - lootAimPitch) < Math.atan2(0.9, dObj) &&
             (g.ammo ?? 1) > 0 &&
             (g.reload ?? 0.0) <= 0.0 &&
             dObj < 85.0
@@ -1960,7 +1963,7 @@ export class Bot {
 
     // 9. Aiming, Regen-Timer Firewall & Firing
     let aimYaw = Number(me.aim[0]);
-    let aimPitch = 0.0;
+    let aimPitch = lootAimPitch;
 
     let fireTarget = target;
     if (fireTarget === null && this.mode === "retreat") {
