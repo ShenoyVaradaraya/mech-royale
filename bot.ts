@@ -89,6 +89,13 @@ export const DEFAULT_P = {
   trees: 0, // model tree concealment in our own visibility checks (cover, hiding, MRM)
   detailR: 140,
   detailGap: 35,
+  rGate: 0, // only start a fight we can finish before another known mech could join (mechs attacking us are still fought)
+  rGateMargin: 2, // seconds of slack the kill needs over the first reinforcement
+  openCubes: 0, // opening: before this many cubes (and before openUntil), value cubes, crates and drones highly
+  openUntil: 70,
+  laserStandoff: 170, // >0: with a laser (and no lightning in use), fight a non-laser, non-lightning target from at least this range
+  laserFirst: 0, // laser search out to 300 m for the whole match (pair with laserScore 9, lightScore 1.5, mortarScore 0.5)
+  turnLead: 0, // lead less when a target's velocity just changed (strafe reversal), fully when it moves steadily
 }
 export type Params = typeof DEFAULT_P
 
@@ -138,6 +145,7 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
   const lastAttack = new Map<number, number>()
   const npcAttack = new Map<number, number>()
   let lastTargetId = -1
+  const velHist = new Map<number, number[]>()
   let dodging = -99
   let peekCover: number[] | null = null
   let mrmPt: number[] | null = null
@@ -232,7 +240,7 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
       if (pickup.kind !== "laser" || obs.t - (failedTake.get(pickup.id) ?? -99) < 4) continue
       const [px, py, pz] = pickup.pos
       const distance = Math.hypot(px - x, py - y)
-      const limit = underFire ? P.kitSearch > 2 ? 87 : 53 : 180
+      const limit = underFire ? P.kitSearch > 2 ? 87 : 53 : P.laserFirst ? 300 : 180
       if (distance > limit || Math.abs(pz - z) > 4 || !inCircle(pickup.pos, safeCircle(obs, distance / 10 + 4), 6)) continue
       const exposure = routeExposure(x, y, px, py, threats)
       if (underFire && exposure > 0.55 || exposure > 2) continue
@@ -453,7 +461,7 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
       const act: Omit<Action, "tick"> = {}
       const hpF = me.hp / me.max_hp
 
-      const lookingForLaser = P.kitSearch && t < 150 && !me.weapons.some((weapon) => weapon?.kind === "laser")
+      const lookingForLaser = P.kitSearch && t < (P.laserFirst ? 400 : 150) && !me.weapons.some((weapon) => weapon?.kind === "laser")
       if (P.kitSearch > 1 && lookingForLaser) rememberSurvey(obs)
 
       // ---- tracking
@@ -566,7 +574,22 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
         const ghostNow = P.ghost && t > P.ghostT
         const want = ghostNow ? (t - (attackedBy.get(e.id) ?? -99) < 4 || d < P.closeRange) && (losOk || d < 20)
           : holdingCover ? hostile && losOk : hostile || weak || goodOpening || (P.aggressive && hpF > 0.8 && visible.length === 1)
-        if (!want) continue
+        let gated = false
+        if (want && P.rGate && !attackedBy.has(e.id) && e.id !== lastTargetId) {
+          const ttk = e.hp / Math.max(35, dpsOf(myW, d, me.cubes))
+          let tR = Infinity
+          for (const o of enemies) {
+            if (o.id === e.id) continue
+            const dO = dist(o)
+            if (dO > 260) continue
+            const toMe = Math.atan2(y - o.pos[1], x - o.pos[0])
+            const closing = o.vel[0] * Math.cos(toMe) + o.vel[1] * Math.sin(toMe)
+            const tO = seeingMe.includes(o) ? 0.5 : Math.max(0, dO - 110) / (closing > 2 ? Math.max(closing, 8) : 5)
+            if (tO < tR) tR = tO
+          }
+          gated = ttk + P.rGateMargin > tR
+        }
+        if (!want || gated) continue
         let s = d / 40 + e.hp / 400 + (losOk ? 0 : 4) - (attackedBy.has(e.id) ? 1 : 0)
         if (P.targetPriority && useGuard) {
           const toEnemy = Math.atan2(e.pos[1] - y, e.pos[0] - x)
@@ -609,6 +632,7 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
       const observedDps = P.survival || recoverEarly ? recentDamage.reduce((sum, hit) => sum + hit.amount, 0) / 1.2 : 0
       const ttdMe = me.hp / Math.max(1, incoming * (1 - myArmor), observedDps)
       const ttkT = target ? target.hp / Math.max(1, dpsOf(myW, dist(target), me.cubes)) : Infinity
+      const opening = P.openCubes > 0 && t < P.openUntil && me.cubes < P.openCubes && t - lastDamagedT > 3 && seeingMe.length === 0
       const winning = target !== null && ttkT < ttdMe * P.duelMargin
       const activeAttackers = P.survival || recoverEarly ? visible.filter((e) => t - (lastAttack.get(e.id) ?? -99) < 3).length : 0
       const pressured = P.survival && (activeAttackers >= 2 && hpF < 0.84 || observedDps > 180 && ttdMe < 4.2)
@@ -755,6 +779,7 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
         if (tLight && !(lightS >= 0 && me.energy > 20)) pref = Math.max(pref, P.kiteRange)
         const shortCircuit = P.laserCounter > 0 && lightS >= 0 && laserS < 0 && target.weapons.includes("laser") && me.energy > 15
         if (shortCircuit) pref = Math.min(pref, C.weapons.lightning.range * 0.6)
+        if (P.laserStandoff > 0 && laserS >= 0 && !(lightS >= 0 && me.energy > 20) && !tLight && !target.weapons.includes("laser")) pref = Math.max(pref, P.laserStandoff)
         if (t > strafeUntil) {
           strafeDir = R() < 0.5 ? -1 : 1
           strafeUntil = t + P.strafeMin + R() * (P.strafeMax - P.strafeMin)
@@ -914,16 +939,16 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
           }
           if (v > 0) considerGoal(p.pos, v)
         }
-        if (me.cubes < P.cubeCap) for (const c of cubes.values()) if (Math.abs(c.pos[2] - z) < 4) considerGoal(c.pos, 4)
-        if (P.prepare === 1 && (!haveSecond || me.cubes < 4) && gunS >= 0 && hpF > 0.76 && !recentlyHurt) {
+        if (me.cubes < P.cubeCap) for (const c of cubes.values()) if (Math.abs(c.pos[2] - z) < 4) considerGoal(c.pos, opening ? 12 : 4)
+        if ((opening || P.prepare === 1 && (!haveSecond || me.cubes < 4)) && gunS >= 0 && hpF > 0.76 && !recentlyHurt) {
           for (const c of crates.values()) {
-            if (t - c.seen > 0.8 || Math.abs(c.pos[2] - z) > 4 || dist(c) > 62) continue
+            if (t - c.seen > 0.8 || Math.abs(c.pos[2] - z) > 4 || dist(c) > (opening ? 90 : 62)) continue
             const clear = world.los(x, y, muzZ, c.pos[0], c.pos[1], c.pos[2] + 1.2, 1)
             if (!clear || visible.some((e) => Math.hypot(e.pos[0] - c.pos[0], e.pos[1] - c.pos[1]) < 55)) continue
             considerGoal(c.pos, haveSecond ? 1.2 : 2.5, c)
           }
         }
-        if (P.stockpile && t < 125 && me.cubes < 6 && gunS >= 0 && hpF > 0.78 && !recentlyHurt && !seeingMe.length) {
+        if ((opening || P.stockpile && t < 125 && me.cubes < 6) && gunS >= 0 && hpF > 0.78 && !recentlyHurt && !seeingMe.length) {
           for (const n of npcs.values()) {
             const distance = dist(n)
             if (distance > 70 || !n.vis || !world.los(x, y, muzZ, n.pos[0], n.pos[1], n.pos[2] + 1.75, 0.9)) continue
@@ -1127,8 +1152,13 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
           const gs = W[gunS]!.stats.speed
           const latency = 0.05
           const pp = [tp[0] + tv[0] * latency, tp[1] + tv[1] * latency, tp[2] + Math.max(-5, tv[2]) * latency * 0.5]
-          const ti = intercept(o, pp, [tv[0] * P.aimLead, tv[1] * P.aimLead, tv[2] * 0.3], gs)
-          if (ti !== null) ap = [pp[0] + tv[0] * ti * P.aimLead, pp[1] + tv[1] * ti * P.aimLead, pp[2] + tv[2] * 0.3 * ti]
+          let lf = P.aimLead
+          if (P.turnLead) {
+            const pv = velHist.get(target.id)
+            if (pv) lf = Math.hypot(tv[0] - pv[0], tv[1] - pv[1]) > 2.2 ? 0.55 : Math.hypot(tv[0], tv[1]) > 3 ? 1.0 : P.aimLead
+          }
+          const ti = intercept(o, pp, [tv[0] * lf, tv[1] * lf, tv[2] * 0.3], gs)
+          if (ti !== null) ap = [pp[0] + tv[0] * ti * lf, pp[1] + tv[1] * ti * lf, pp[2] + tv[2] * 0.3 * ti]
         }
         let useMortarOnly = false
         // Aim at the predicted impact point when the mortar is nearly ready.
@@ -1234,13 +1264,13 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
             if (lootCrate) break
             if (t - c.seen > 0.5) continue
             const d = Math.hypot(c.pos[0] - x, c.pos[1] - y)
-            if (d < P.crateRadius && d < bd && world.los(x, y, muzZ, c.pos[0], c.pos[1], c.pos[2] + 1.2, 0.8)) { bd = d; best = { pos: c.pos, h: 1.2 } }
+            if (d < (opening ? 120 : P.crateRadius) && d < bd && world.los(x, y, muzZ, c.pos[0], c.pos[1], c.pos[2] + 1.2, 0.8)) { bd = d; best = { pos: c.pos, h: 1.2 } }
           }
           for (const n of npcs.values()) {
             if (!n.vis) continue
             const d = Math.hypot(n.pos[0] - x, n.pos[1] - y)
             const angry = t - (npcAttack.get(n.id) ?? -99) < 4
-            if (n !== lootDrone && !angry && (!P.npcFarm || best || P.survival && (hpF < 0.92 || visible.length > 0))) continue
+            if (n !== lootDrone && !angry && (!(P.npcFarm || opening) || best || P.survival && (hpF < 0.92 || visible.length > 0))) continue
             if (n === lootDrone) bd = Infinity
             if (angry) bd = Infinity
             if (d < (angry ? 120 : 70) && d < bd && (hpF > 0.6 || angry) && world.los(x, y, muzZ, n.pos[0], n.pos[1], n.pos[2] + 1.75, 0.8)) { bd = d; best = { pos: n.pos, h: 1.75 } }
@@ -1302,6 +1332,7 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
       act.jump = jump
       act.aim = [wrap(aimYaw), Math.max(C.mech.min_pitch, Math.min(C.mech.max_pitch, aimPitch))]
       act.fire = fire
+      if (P.turnLead) for (const m of obs.mechs) if (m.kind === "mech") velHist.set(m.id, [m.vel[0], m.vel[1]])
       return act
     },
     debugMode: () => mode,
