@@ -18,7 +18,7 @@ def toward(a, b, stop=1.4):
 
 
 class Bot:
-    name = "Corner Runner v12"
+    name = "mech-royale"
     loot_range = 160
     staging_weight = 0.8
     opening_cubes = 3
