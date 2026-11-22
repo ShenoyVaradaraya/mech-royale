@@ -86,7 +86,7 @@ export const DEFAULT_P = {
   laserCounter: 0, // no laser/lightning: break LOS from laser carriers; with lightning: close in to short them; dodge charging lasers in any mode
   preempt: 0, // treat enemies aiming at us (clear line, <230 m) as hostile
   spin: 0, // idle look-around: rotate the torso continuously when no enemy is known
-  trees: 0, // model tree concealment in our own visibility checks (cover, hiding, MRM)
+  trees: 1, // model tree concealment in our own visibility checks (cover, hiding, MRM)
   detailR: 140,
   detailGap: 35,
 }
