@@ -13,7 +13,7 @@ export const DEFAULT_P = {
   strafeMin: 0.6,
   strafeMax: 1.4,
   boostDodge: 0,
-  lootRadius: 140,
+  lootRadius: 200,
   crateRadius: 70,
   npcFarm: 0,
   dropGrab: 0,
