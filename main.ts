@@ -1,7 +1,7 @@
 import { run, log } from "./mechfight.ts"
 import { World } from "./world.ts"
 import { Nav } from "./nav.ts"
-import { makeBot } from "./bot.ts"
+import { Bot, makeBot } from "./apex-bot.ts"
 import { existsSync } from "node:fs"
 import { join } from "node:path"
 
@@ -19,5 +19,5 @@ run((hello) => {
     for (let k = 0; k < 300; k++) world.treeClear(-300 + k, -50, 8, 200 - k, 80, 4.5)
   }
   log(`map loaded + warmed in ${(performance.now() - t0).toFixed(0)} ms`)
-  return makeBot(hello, world, nav)
+  return { name: Bot.botName, act: makeBot(hello, world, nav) }
 })

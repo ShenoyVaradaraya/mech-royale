@@ -1,6 +1,8 @@
 # Mech Royale bot
 
-A TypeScript entry for Builders Mech Royale. The main bot reads live game observations and the arena map. Its movement, aim, and loot decisions are independent of the `hello.seed` field.
+A TypeScript entry for Builders Mech Royale. The live entry point and Docker image run Apex-ZeroLatency-Hybrid from `apex-bot.ts`. The bot uses the arena map and seeds its movement variation from `hello.seed`.
+
+The bundled arena visibility map, `arena/v2/hidemap.gz`, comes from Corner Runner v14 at commit `417d3176d5eb70b9f4d30ba69429b418d31fc0ae`. Its license notices are in `arena/v2/`.
 
 ## Local evaluation
 
@@ -11,6 +13,8 @@ npm run verify
 npm run check
 npm run benchmark
 ```
+
+`npm run check` exercises Apex through the live protocol. The verification and benchmark scripts use the C4 policy in `bot.ts`. The results below record earlier policy experiments.
 
 The benchmark defaults to seeds 1–100 and copies the simulator, configuration, and arena from `../builders/bot` into a temporary directory. The fixed house-bot tiers and hunter behavior follow that folder's `sim/eval.ts`. Set `BENCH_HARNESS` to a different checkout when needed. `BENCH_HARNESS=local` uses the simulator in this repository. Set `BENCH_RAW=1` to include each match’s result.
 

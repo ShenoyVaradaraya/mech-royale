@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs"
 import { join } from "node:path"
 
 export type V3 = [number, number, number]
+type Prism = { base: number; top: number; ring: number[]; holes: number[][] }
 
 function pointInRing(x: number, y: number, r: number[]): boolean {
   let inside = false
@@ -38,6 +39,7 @@ export class World {
   maxX: number
   minY: number
   maxY: number
+  readonly prisms: readonly Prism[]
   trees: { x: number; y: number; z: number; h: number; cr: number; cb: number; tr: number; cx: number; cy: number }[] = []
 
   constructor(dir: string) {
@@ -65,7 +67,8 @@ export class World {
     this.gc = new Float32Array(N)
     for (let j = 0; j < this.ny; j++)
       for (let i = 0; i < this.nx; i++) this.gc[j * this.nx + i] = this.ground(this.tMinX + i + 0.5, this.tMinY + j + 0.5)
-    for (const p of w.prisms) this.addPrism(p)
+    this.prisms = w.prisms
+    for (const p of this.prisms) this.addPrism(p)
     this.surf = new Float32Array(N)
     this.maxTop = new Float32Array(N)
     for (let k = 0; k < N; k++) {
@@ -99,7 +102,7 @@ export class World {
     }
   }
 
-  private addPrism(p: { base: number; top: number; ring: number[]; holes: number[][] }) {
+  private addPrism(p: Prism) {
     const r = p.ring
     let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity
     for (let k = 0; k < r.length; k += 2) {
