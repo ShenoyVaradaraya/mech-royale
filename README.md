@@ -2,11 +2,17 @@
 
 ## What the image runs
 
-The top-level `Dockerfile` runs **Corner Runner**, a Python bot by the Corner Runner contributors, used under the MIT License (see [`LICENSE.corner-runner`](LICENSE.corner-runner)). The files `bot.py`, `arena.py`, `lead_model.py` and `mechfight.py` are copied unchanged from [lalitaditya/corner-runner](https://github.com/lalitaditya/corner-runner) branch `python-v12`, commit `183dd6176feaa391efda0aee3634d5e710b32c66`. Any changes we make to them will be listed here.
+The top-level `Dockerfile` runs **Corner Runner v14**, a Python bot by the Corner Runner contributors, used under the MIT License (see [`LICENSE.corner-runner`](LICENSE.corner-runner)). Its decision engine is their Python port of the engine by ahmad-ovh, also MIT (see [`licenses/engine-MIT.txt`](licenses/engine-MIT.txt)); `gorandom.py` follows Go's random number generator, BSD licensed (see [`licenses/Go-BSD.txt`](licenses/Go-BSD.txt)).
+
+The files `bot.py`, `decisions.py`, `protocol.py`, `world.py`, `gorandom.py`, `semantics.py`, `campus.nav`, `hidemap.gz`, `build_world.py`, `spatial.pyx` and `licenses/` come from [lalitaditya/corner-runner](https://github.com/lalitaditya/corner-runner) branch `v14`, commit `417d3176d5eb70b9f4d30ba69429b418d31fc0ae`. All are copied unchanged except for the changes listed here.
 
 | File | Change |
 | --- | --- |
-| (none yet) | |
+| `decisions.py` | Bot name `mech-royale`. |
+| `decisions.py` | Ported the five features ahmad-ovh adopted in Apex-Go v3 ([ahmad-ovh/Buildathon](https://github.com/ahmad-ovh/Buildathon) commit `56e0f76`, MIT) from Go: enemy laser cooldown tracking, rear-arc avoidance while steering, cover reload, shooting the plinking drone while retreating, and practice rim positioning. |
+| `decisions.py` | Faster path-cost callback and hideout search: the same arithmetic with loop invariants hoisted and a key sort, verified to give identical actions on 9,156 recorded decisions; worst decision time 38 ms to 18 ms. |
+| `decisions.py` | Rear-arc avoidance weight 60 instead of 35. |
+| `Dockerfile` | Copies `LICENSE.corner-runner` into the image as `LICENSE`. |
 
 The TypeScript bot below (`bot.ts` and friends) is our earlier entry. It stays in the repository but is not built into the image.
 
