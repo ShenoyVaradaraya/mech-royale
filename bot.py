@@ -18,7 +18,7 @@ def toward(a, b, stop=1.4):
 
 
 class Bot:
-    name = "Corner Runner v12"
+    name = "mech-royale"
     loot_range = 160
     staging_weight = 0.8
     opening_cubes = 3
@@ -29,6 +29,7 @@ class Bot:
     avoid_radius = 60
     laser_bias = 4
     duel_range = 130
+    laser_range = 170
 
     def __init__(self, hello):
         self.map = Arena(hello["map"]["dir"])
@@ -115,7 +116,8 @@ class Bot:
         nx, ny = (q[0] - p[0]) / d, (q[1] - p[1]) / d
         secondary = me["weapons"][1]
         arc = secondary and secondary["kind"] == "lightning" and me["energy"] > 10
-        desired = 18 if arc else self.duel_range
+        laser_held = secondary and secondary["kind"] == "laser" and not ({"laser", "lightning"} & set(enemy.get("weapons", [])))
+        desired = 18 if arc else (self.laser_range if laser_held else self.duel_range)
         radial = max(-1, min(2, (d - desired) / 12))
         side = 1 if int(obs["t"] / 1.35) % 2 else -1
         dx, dy = radial * nx - side * ny, radial * ny + side * nx
@@ -265,6 +267,8 @@ class Bot:
             return self.saved_step
         best, score = None, -math.inf
         desired = 31 if me["weapons"][1] and me["weapons"][1]["kind"] == "lightning" else self.duel_range
+        if me["weapons"][1] and me["weapons"][1]["kind"] == "laser" and not ({"laser", "lightning"} & set(foe.get("weapons", []))):
+            desired = self.laser_range
         if desired > 50 and "lightning" not in foe["weapons"] and me["cubes"] < 9:
             if len(others) <= 1 and me["hp"] > 1.1 * foe.get("hp", 1400):
                 desired = 28 if foe.get("hp", 1400) < 500 else 70
