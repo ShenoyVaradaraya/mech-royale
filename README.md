@@ -6,7 +6,8 @@ The top-level `Dockerfile` runs **Corner Runner**, a Python bot by the Corner Ru
 
 | File | Change |
 | --- | --- |
-| (none yet) | |
+| `bot.py` | Bot name `mech-royale`. |
+| `bot.py` | Opening ends at 2 cubes instead of 3. |
 
 The TypeScript bot below (`bot.ts` and friends) is our earlier entry. It stays in the repository but is not built into the image.
 
