@@ -18,7 +18,7 @@ def toward(a, b, stop=1.4):
 
 
 class Bot:
-    name = "Corner Runner v12"
+    name = "mech-royale"
     loot_range = 160
     staging_weight = 0.8
     opening_cubes = 3
@@ -117,7 +117,7 @@ class Bot:
         arc = secondary and secondary["kind"] == "lightning" and me["energy"] > 10
         desired = 18 if arc else self.duel_range
         radial = max(-1, min(2, (d - desired) / 12))
-        side = 1 if int(obs["t"] / 1.35) % 2 else -1
+        side = 1 if int(obs["t"] / 0.6) % 2 else -1
         dx, dy = radial * nx - side * ny, radial * ny + side * nx
         zone = obs["zone"]
         best, rank = [0, 0], -math.inf

@@ -6,7 +6,8 @@ The top-level `Dockerfile` runs **Corner Runner**, a Python bot by the Corner Ru
 
 | File | Change |
 | --- | --- |
-| (none yet) | |
+| `bot.py` | Bot name `mech-royale`. |
+| `bot.py` | Strafe reversals every 0.6 s instead of 1.35 s. |
 
 The TypeScript bot below (`bot.ts` and friends) is our earlier entry. It stays in the repository but is not built into the image.
 
