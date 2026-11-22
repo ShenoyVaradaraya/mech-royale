@@ -68,7 +68,7 @@ export const DEFAULT_P = {
   recoverEarly: 1,
   targetPriority: 1,
   armedGuard: 1,
-  kitSearch: 2,
+  kitSearch: 1,
   mrm: 0,
   mrmMin: 2,
   mrmNoLos: 3,
