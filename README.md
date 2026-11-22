@@ -2,11 +2,11 @@
 
 ## What the image runs
 
-The top-level `Dockerfile` runs **Corner Runner**, a Python bot by the Corner Runner contributors, used under the MIT License (see [`LICENSE.corner-runner`](LICENSE.corner-runner)). The files `bot.py`, `arena.py`, `lead_model.py` and `mechfight.py` are copied unchanged from [lalitaditya/corner-runner](https://github.com/lalitaditya/corner-runner) branch `python-v12`, commit `183dd6176feaa391efda0aee3634d5e710b32c66`. Any changes we make to them will be listed here.
+The top-level `Dockerfile` runs **Corner Runner**, a Python bot by the Corner Runner contributors, used under the MIT License (see [`LICENSE.corner-runner`](LICENSE.corner-runner)). The files `bot.py`, `arena.py`, `lead_model.py` and `mechfight.py` come from [lalitaditya/corner-runner](https://github.com/lalitaditya/corner-runner) branch `v15`, commit `c2dd2697e05e54cfc9edd7b2fbadfd0fdf55f940`. `arena.py`, `lead_model.py` and `mechfight.py` are copied unchanged. Our changes to `bot.py` are listed here.
 
 | File | Change |
 | --- | --- |
-| (none yet) | |
+| `bot.py` | Bot name `mech-royale`. |
 
 The TypeScript bot below (`bot.ts` and friends) is our earlier entry. It stays in the repository but is not built into the image.
 
