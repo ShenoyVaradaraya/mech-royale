@@ -3,7 +3,7 @@ import { availableParallelism, tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { pathToFileURL } from "node:url"
 import { isMainThread, parentPort, Worker, workerData } from "node:worker_threads"
-import { DEFAULT_P, ENTRY_PARAMS, makeBot, type Params } from "../bot.ts"
+import { DEFAULT_P, makeBot, type Params } from "../bot.ts"
 import { makeExample } from "./example.ts"
 import type { runMatch as localRunMatch } from "./sim.ts"
 
@@ -15,7 +15,7 @@ type Result = {
 }
 const requestedRoster = process.env.BENCH_ROSTER
 const roster = requestedRoster === "mixed" || requestedRoster === "practice" ? requestedRoster : undefined
-const perfectScore = 15
+const developmentTarget = 6.5
 const evaluationMatches = 100
 
 if (!isMainThread) {
@@ -35,7 +35,7 @@ if (!isMainThread) {
   if (!Number.isSafeInteger(count) || count < 1 || !Number.isSafeInteger(start) || start < 0 || !Number.isSafeInteger(start + count - 1)) {
     throw new Error("Usage: node sim/benchmark.ts COUNT START_SEED 'name={...}' ...")
   }
-  const variants: Variant[] = (variantArgs.length ? variantArgs : [`main=${JSON.stringify(ENTRY_PARAMS)}`]).map((arg) => {
+  const variants: Variant[] = (variantArgs.length ? variantArgs : ["main={}"]).map((arg) => {
     const separator = arg.indexOf("=")
     if (separator < 1) throw new Error(`Expected name=JSON, got ${arg}`)
     const params: Variant["params"] = JSON.parse(arg.slice(separator + 1))
@@ -97,17 +97,16 @@ if (!isMainThread) {
     const scores = runs.map((r) => r.score)
     const average = mean(scores)
     const tail = scores.slice().sort((a, b) => a - b).slice(0, Math.ceil(count / 4))
-    const differences = runs.map((r) => r.score - baseline.get(r.seed)!)
-    const delta = mean(differences)
-    const standardError = count > 1 ? Math.sqrt(mean(differences.map((d) => (d - delta) ** 2)) / (count - 1)) : 0
+    const delta = mean(runs.map((r) => r.score - baseline.get(r.seed)!))
     const worst = Math.min(...scores), best = Math.max(...scores)
-    const wins = scores.filter((score) => score === perfectScore).length
-    const bottomFour = scores.filter((score) => score < 4).length
+    const wins = scores.filter((score) => score === 15).length
     const earlyDeaths = runs.filter((r) => r.t < 60 && r.score < 15).length
     const beforeContact = runs.filter(({ st }) => st.firstSecondaryAt !== null &&
       (st.firstCombatDamageAt === null || st.firstSecondaryAt < st.firstCombatDamageAt)).length
     const earlyLaser = runs.filter(({ st }) => st.firstLaserAt !== null && st.firstLaserAt < 60).length
-    console.log(`${name.padEnd(14)} mean ${average.toFixed(2)}  paired Δ ${delta >= 0 ? "+" : ""}${delta.toFixed(2)} (SE ${standardError.toFixed(2)})  range ${worst}–${best}  wins ${wins}/${count}  bottom four ${bottomFour}/${count}  bottom quartile ${mean(tail).toFixed(2)}  early deaths ${earlyDeaths}/${count}  life ${mean(runs.map((r) => r.t)).toFixed(0)}s`)
+    const gate = count === evaluationMatches && !roster && harnessOption !== "local"
+      ? `  development target ${developmentTarget.toFixed(2)} ${average >= developmentTarget ? "met" : "unmet"}` : ""
+    console.log(`${name.padEnd(14)} mean ${average.toFixed(2)}  paired Δ ${delta >= 0 ? "+" : ""}${delta.toFixed(2)}  range ${worst}–${best}  bottom quartile ${mean(tail).toFixed(2)}  wins ${wins}/${count}  early deaths ${earlyDeaths}/${count}  life ${mean(runs.map((r) => r.t)).toFixed(0)}s${gate}`)
     console.log(`  Secondaries before damage ${beforeContact}/${count}  laser before 60s ${earlyLaser}/${count}`)
     if (process.env.BENCH_RAW === "1") for (const run of runs) console.log(JSON.stringify(run))
   }

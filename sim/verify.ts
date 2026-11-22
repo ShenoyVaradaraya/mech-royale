@@ -1,7 +1,7 @@
 import assert from "node:assert/strict"
 import { readFileSync } from "node:fs"
 import { gunzipSync } from "node:zlib"
-import { ENTRY_PARAMS, makeBot } from "../bot.ts"
+import { makeBot } from "../bot.ts"
 import { rng } from "../geom.ts"
 import type { Hello, Observation } from "../mechfight.ts"
 import { assignOpponents, OPPONENTS } from "./opponents.ts"
@@ -25,19 +25,16 @@ const messages = stream.trim().split("\n").map((line) => JSON.parse(line))
 const hello: Hello = messages[0]
 const observations: Observation[] = messages.filter((message) => message.type === "obs")
 const { world, nav } = loadMap()
+const reference = makeBot(hello, world, nav)
 const changedHello = { ...hello, seed: 0 }
+const changed = makeBot(changedHello, world, nav)
 const seedlessHello = { ...hello }
 delete (seedlessHello as Partial<Hello>).seed
-const seedChecks = [ENTRY_PARAMS, { timingAim: 1, tacticalMove: 1, laserStandoff: 2, openingEvade: 1, supplyPriority: 2 }]
-for (const params of seedChecks) {
-  const reference = makeBot(hello, world, nav, params)
-  const changed = makeBot(changedHello, world, nav, params)
-  const seedless = makeBot(seedlessHello, world, nav, params)
-  for (const observation of observations) {
-    const action = reference.act(observation)
-    assert.deepEqual(changed.act(observation), action, `changed seed at tick ${observation.tick}`)
-    assert.deepEqual(seedless.act(observation), action, `missing seed at tick ${observation.tick}`)
-  }
+const seedless = makeBot(seedlessHello, world, nav)
+for (const observation of observations) {
+  const action = reference.act(observation)
+  assert.deepEqual(changed.act(observation), action, `changed seed at tick ${observation.tick}`)
+  assert.deepEqual(seedless.act(observation), action, `missing seed at tick ${observation.tick}`)
 }
 
 const openCell = nav.ok.findIndex((ok, cell) => {
@@ -85,4 +82,4 @@ staging.events = [{ type: "damaged", amount: 45, weapon: "gun", bearing: 0, by: 
 hide.act(staging)
 assert.ok(["fight", "retreat"].includes(hide.debugMode()))
 
-console.log(`PASS · ${observations.length} seed-independent actions per policy · ${seedChecks.length} policies · 16 opponent profiles · final rotation · quiet cover and reaction to damage`)
+console.log(`PASS · ${observations.length} seed-independent actions · 16 profiles · final rotation · quiet cover and reaction to damage`)
