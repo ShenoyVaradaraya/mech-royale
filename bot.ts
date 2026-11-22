@@ -17,9 +17,9 @@ export const DEFAULT_P = {
   crateRadius: 70,
   npcFarm: 0,
   dropGrab: 0,
-  laserScore: 5,
-  lightScore: 2.2,
-  mortarScore: 1.2,
+  laserScore: 9,
+  lightScore: 1.5,
+  mortarScore: 0.5,
   coverSearch: 55,
   finishHp: 260, // keep fighting a target below this hp even when low
   fearCount: 2, // retreat earlier when this many enemies see us
@@ -89,6 +89,13 @@ export const DEFAULT_P = {
   trees: 0, // model tree concealment in our own visibility checks (cover, hiding, MRM)
   detailR: 140,
   detailGap: 35,
+  aaBystander: 0, // leave harmless mechs alone: without a laser, never shoot first at a harmless mech beyond 55 m
+  aaLaser: 1, // laser first: seek a laser up to 300 m away, all match long
+  aaSweep: 0, // full 360-degree look-around at the start, then every 15 s (6 s without a laser) when calm
+  aaJetScan: 0, // start a sweep with a jet hop when we have no laser and 90+ energy
+  aaDropHeal: 0, // below 95% hp, go capture an uncontested supply drop within 250 m (full heal), even mid-fight
+  aaAim: 0, // adaptive lead: learn how far each target really moves sideways after our shots
+  aaFFA: 0, // detect free-for-all (others hurting each other) and stop starting fights with harmless mechs there
 }
 export type Params = typeof DEFAULT_P
 
@@ -128,6 +135,16 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
   let lastDamagedT = -99
   let recentDamage: { amount: number; t: number }[] = []
   let freshSalvage: { pos: number[]; until: number } | null = null
+  const dealt = new Map<number, number>() // damage we have done to each mech
+  const lastHitOn = new Map<number, number>() // last time we hit each mech
+  const lastHp = new Map<number, number>() // last seen hp of each mech (free-for-all detection)
+  let ffaEvidence = 0
+  let sweepOn = false, sweepAcc = 0, sweepYaw = 0, lastSweep = -1
+  let jetScanUntil = -99, jetScanJump = false
+  const leadEst = new Map<number, number>()
+  let leadGlobal = 1
+  const leadShots: { id: number; t0: number; tt: number; p0: number[]; perp: number[]; pred: number }[] = []
+  const lastLeadShot = new Map<number, number>()
   let dmgBearings: { b: number; t: number; by: number | null }[] = []
   let wander: number[] | null = null
   let wanderT = -99
@@ -232,7 +249,7 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
       if (pickup.kind !== "laser" || obs.t - (failedTake.get(pickup.id) ?? -99) < 4) continue
       const [px, py, pz] = pickup.pos
       const distance = Math.hypot(px - x, py - y)
-      const limit = underFire ? P.kitSearch > 2 ? 87 : 53 : 180
+      const limit = underFire ? P.kitSearch > 2 ? 87 : 53 : P.aaLaser ? 300 : 180
       if (distance > limit || Math.abs(pz - z) > 4 || !inCircle(pickup.pos, safeCircle(obs, distance / 10 + 4), 6)) continue
       const exposure = routeExposure(x, y, px, py, threats)
       if (underFire && exposure > 0.55 || exposure > 2) continue
@@ -453,7 +470,7 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
       const act: Omit<Action, "tick"> = {}
       const hpF = me.hp / me.max_hp
 
-      const lookingForLaser = P.kitSearch && t < 150 && !me.weapons.some((weapon) => weapon?.kind === "laser")
+      const lookingForLaser = P.kitSearch && t < (P.aaLaser ? 400 : 150) && !me.weapons.some((weapon) => weapon?.kind === "laser")
       if (P.kitSearch > 1 && lookingForLaser) rememberSurvey(obs)
 
       // ---- tracking
@@ -490,6 +507,11 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
         } else if (e.type === "damaged") {
           // zone damage: does not count as combat for our logic
         } else if (e.type === "take_failed") failedTake.set(e.id, t)
+        else if (e.type === "hit" && (e as any).target < 16) {
+          const tg = (e as any).target as number
+          dealt.set(tg, (dealt.get(tg) ?? 0) + ((e as any).amount ?? 0))
+          lastHitOn.set(tg, t)
+        }
         else if (e.type === "kill" && (P.killCleanup || P.harvest && guardReady(obs))) {
           // a confirmed kill is never a threat again (previously only cleared when holding a secondary)
           const defeated = tracks.get(e.target)
@@ -529,6 +551,45 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
       const enemies = [...tracks.values()].filter((e) => t - e.seen < 6)
       const visible = enemies.filter((e) => e.vis)
       const dist = (e: { pos: number[] }) => Math.hypot(e.pos[0] - x, e.pos[1] - y, e.pos[2] - z)
+      // a mech is harmless unless it hunts us, carries a nearby laser, is cube-rich, or we have hurt it badly
+      const harmless = (e: Track) => {
+        if (t - (lastAttack.get(e.id) ?? -99) < 6) return false
+        const dd = dist(e)
+        const toMe = Math.atan2(y - e.pos[1], x - e.pos[0])
+        const closing = e.vel[0] * Math.cos(toMe) + e.vel[1] * Math.sin(toMe)
+        if (e.vis && dd < 320 && dd > 35 && closing > 3) return false
+        if (e.vis && dd < 220 && e.charging && Math.abs(wrap(e.aim[0] - toMe)) < 0.08) return false
+        if (e.weapons.includes("laser") && dd < 170) return false
+        if (e.cubes > 3) return false
+        if ((dealt.get(e.id) ?? 0) >= 150) return false
+        return true
+      }
+      // free-for-all: other mechs lose hp we did not cause, with no drone beside them
+      if (P.aaFFA) {
+        for (const m of obs.mechs) {
+          if (m.kind !== "mech" || m.hp === undefined) continue
+          const prev = lastHp.get(m.id)
+          if (prev !== undefined && m.hp < prev - 30 && t - (lastHitOn.get(m.id) ?? -99) > 1 &&
+              !obs.mechs.some((n) => n.kind === "npc" && Math.hypot(n.pos[0] - m.pos[0], n.pos[1] - m.pos[1]) < 70)) ffaEvidence++
+          lastHp.set(m.id, m.hp)
+        }
+      }
+      const ffa = P.aaFFA > 0 && ffaEvidence >= 2
+      // adaptive lead: compare where targets really went with where a straight-line lead said they would be
+      if (P.aaAim) {
+        for (let k = leadShots.length - 1; k >= 0; k--) {
+          const sh = leadShots[k]
+          if (t < sh.t0 + sh.tt) continue
+          const tr = tracks.get(sh.id)
+          if (tr && tr.vis && t - (sh.t0 + sh.tt) < 0.25) {
+            const actual = (tr.pos[0] - sh.p0[0]) * sh.perp[0] + (tr.pos[1] - sh.p0[1]) * sh.perp[1]
+            const r = Math.max(-0.5, Math.min(1.5, actual / sh.pred))
+            leadEst.set(sh.id, (leadEst.get(sh.id) ?? leadGlobal) * 0.8 + r * 0.2)
+            leadGlobal = leadGlobal * 0.95 + r * 0.05
+          }
+          leadShots.splice(k, 1)
+        }
+      }
       const seeingMe = visible.filter((e) => dist(e) < 130 && visibleFrom(e.pos[0], e.pos[1], e.pos[2] + 8, x, y, z, myH))
       const holdingCover = P.hideAtAnchor && mode === "hide" && anchor && me.in_zone && me.grounded &&
         obs.zone.shrink_end === anchorPhase && Math.hypot(anchor[0] - x, anchor[1] - y) < 4 &&
@@ -566,7 +627,10 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
         const ghostNow = P.ghost && t > P.ghostT
         const want = ghostNow ? (t - (attackedBy.get(e.id) ?? -99) < 4 || d < P.closeRange) && (losOk || d < 20)
           : holdingCover ? hostile && losOk : hostile || weak || goodOpening || (P.aggressive && hpF > 0.8 && visible.length === 1)
-        if (!want) continue
+        const haveLaser = W.some((w) => w?.kind === "laser")
+        const holdFire = P.aaBystander > 0 && (ffa || !haveLaser) && d > 55 && harmless(e) &&
+          !(ffa && e.hp < e.maxHp * 0.35 && d < 100)
+        if (!want || holdFire) continue
         let s = d / 40 + e.hp / 400 + (losOk ? 0 : 4) - (attackedBy.has(e.id) ? 1 : 0)
         if (P.targetPriority && useGuard) {
           const toEnemy = Math.atan2(e.pos[1] - y, e.pos[0] - x)
@@ -635,6 +699,18 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
           visible.filter((e) => dist(e) < 120).length <= P.standFight &&
           !(target.weapons.includes("lightning") && lightS < 0 && dist(target) < C.weapons.lightning.range + 5 && !cover))
         mode = "fight"
+      let healDrop: { pos: number[]; radius: number } | null = null
+      if (P.aaDropHeal && hpF < 0.95 && (mode === "retreat" || mode === "fight" || mode === "loot")) {
+        let bd = Infinity
+        for (const dr of obs.drops) {
+          const dd = Math.hypot(dr.pos[0] - x, dr.pos[1] - y)
+          if (dd > 250 || dr.lands_in > dd / 11 + 3 || !(dr.holder === null || dr.holder === me_id)) continue
+          if (!inCircle(dr.pos, safeCircle(obs, Math.max(dd / 11, dr.lands_in) + dr.capture_s), 5)) continue
+          if (enemies.some((e) => Math.hypot(e.pos[0] - dr.pos[0], e.pos[1] - dr.pos[1]) < dr.radius + 6)) continue
+          if (dd < bd) { bd = dd; healDrop = { pos: dr.pos, radius: dr.radius } }
+        }
+        if (healDrop) mode = "drop"
+      }
       const npcAngry = [...npcAttack.values()].some((tt) => t - tt < 4)
       if (mode === "loot" && !npcAngry && t - lastDamagedT > 2 && hpF < P.restHp && inCircle([x, y], safeCircle(obs, 10), P.zoneMargin * 0.5)) mode = "rest"
       if (holdingCover && !npcAngry && (mode === "loot" || mode === "rest")) mode = "hide"
@@ -890,6 +966,11 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
         const g = headingToFinal ? obs.zone.next_center : clampToCircle([x, y], gc, P.safePlay ? Math.min(P.zoneMargin, gc.r * 0.3) : P.zoneMargin)
         mv = goTo(obs, g[0], g[1], x, y, z)
         boost = me.energy > 10 && (!headingToFinal || finalDistance > 10)
+      } else if (mode === "drop" && healDrop) {
+        const dd = Math.hypot(healDrop.pos[0] - x, healDrop.pos[1] - y)
+        mv = dd > healDrop.radius * 0.5 ? goTo(obs, healDrop.pos[0], healDrop.pos[1], x, y, z) : [0, 0]
+        boost = dd > 15 && me.energy > 20
+        if (target) wantFace = Math.atan2(target.pos[1] - y, target.pos[0] - x)
       } else if (mode === "loot") {
         // loot / explore
         let goal: number[] | null = null
@@ -1105,6 +1186,11 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
         mv = sidestepProjectiles(obs, mv, boost, myH, C.mech.radius * scale)
       }
 
+      // jet hop to look over obstacles at the start of a sweep
+      if (t < jetScanUntil && mode !== "fight" && mode !== "retreat") {
+        if (jetScanJump && me.grounded) { jump = true; jetScanJump = false }
+        else if (!me.grounded) boost = me.energy > 30
+      }
       // ---- stuck handling
       const spd = Math.hypot(me.vel[0], me.vel[1])
       const wantMove = Math.hypot(mv[0], mv[1]) > 0.1
@@ -1114,7 +1200,7 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
       if (t < unstickUntil) { jump = me.grounded; boost = !me.grounded && me.energy > 5 }
 
       // ---- aiming & firing
-      if (target && (mode === "fight" || (mode === "retreat" && (finish || dist(target) < 60 || recentlyHurt)) || mode === "zone")) {
+      if (target && (mode === "fight" || (mode === "retreat" && (finish || dist(target) < 60 || recentlyHurt)) || mode === "zone" || mode === "drop")) {
         const targetScale = 1 + (C.cubes.size_per_cube as number) * target.cubes
         const tp = [target.pos[0], target.pos[1], target.pos[2] + C.mech.height * 0.5 * targetScale]
         const tv = target.vel
@@ -1127,8 +1213,18 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
           const gs = W[gunS]!.stats.speed
           const latency = 0.05
           const pp = [tp[0] + tv[0] * latency, tp[1] + tv[1] * latency, tp[2] + Math.max(-5, tv[2]) * latency * 0.5]
-          const ti = intercept(o, pp, [tv[0] * P.aimLead, tv[1] * P.aimLead, tv[2] * 0.3], gs)
-          if (ti !== null) ap = [pp[0] + tv[0] * ti * P.aimLead, pp[1] + tv[1] * ti * P.aimLead, pp[2] + tv[2] * 0.3 * ti]
+          const lf = P.aaAim ? P.aimLead * Math.max(0, Math.min(1.3, leadEst.get(target.id) ?? leadGlobal)) : P.aimLead
+          const ti = intercept(o, pp, [tv[0] * lf, tv[1] * lf, tv[2] * 0.3], gs)
+          if (ti !== null) ap = [pp[0] + tv[0] * ti * lf, pp[1] + tv[1] * ti * lf, pp[2] + tv[2] * 0.3 * ti]
+          if (P.aaAim && ti !== null && t - (lastLeadShot.get(target.id) ?? -99) > 0.3 && leadShots.length < 40) {
+            const L = Math.hypot(tp[0] - x, tp[1] - y) || 1
+            const perp = [-(tp[1] - y) / L, (tp[0] - x) / L]
+            const pred = (tv[0] * perp[0] + tv[1] * perp[1]) * ti
+            if (Math.abs(pred) > 1) {
+              leadShots.push({ id: target.id, t0: t, tt: ti, p0: [target.pos[0], target.pos[1]], perp, pred })
+              lastLeadShot.set(target.id, t)
+            }
+          }
         }
         let useMortarOnly = false
         // Aim at the predicted impact point when the mortar is nearly ready.
@@ -1277,6 +1373,20 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
               scanPhase += dt * 1.2
               const base = Math.hypot(mv[0], mv[1]) > 0.1 ? Math.atan2(mv[1], mv[0]) : me.aim[0]
               aimYaw = base + Math.sin(scanPhase) * 1.2
+            }
+          }
+          if (P.aaSweep) {
+            const calm = !enemies.some((e) => t - e.seen < 2 && dist(e) < 150) && t - lastDamagedT > 2
+            if (!sweepOn && calm && ((lastSweep < 0 && t < 3) || t - lastSweep > (laserS < 0 ? 6 : 15))) {
+              sweepOn = true; sweepAcc = 0; sweepYaw = me.aim[0]
+              if (P.aaJetScan && laserS < 0 && me.energy >= 90 && me.grounded) { jetScanUntil = t + 1.3; jetScanJump = true }
+            }
+            if (sweepOn) {
+              if (!calm) sweepOn = false
+              else {
+                sweepAcc += Math.abs(wrap(me.aim[0] - sweepYaw)); sweepYaw = me.aim[0]
+                if (sweepAcc >= 2 * Math.PI - 0.4) { sweepOn = false; lastSweep = t } else aimYaw = wrap(me.aim[0] + 1.2)
+              }
             }
           }
           aimPitch = 0
