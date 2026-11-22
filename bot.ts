@@ -82,6 +82,7 @@ export const DEFAULT_P = {
   ghostT: 360, // phase 5 starts at 350 s: from here only HP at the final collapse matters
   ghostQuiet: 70,
   budgetMs: 25, // per-decision time budget for optional searches (limit is 50 ms on 1 CPU)
+  descend: 1, // walk off the nearest drop-off edge when no route exists from a raised spot
   killCleanup: 1, // always forget a mech we killed
   laserCounter: 0, // no laser/lightning: break LOS from laser carriers; with lightning: close in to short them; dodge charging lasers in any mode
   preempt: 0, // treat enemies aiming at us (clear line, <230 m) as hostile
@@ -296,6 +297,26 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
       pathGoal = [gx, gy]
       pathT = t
       wp = 0
+    }
+    if (P.descend && distance > 4 && (!path || path.length <= 1)) {
+      // stranded on a raised surface: find an edge we can drop from without first hitting a taller wall
+      const toGoal = Math.atan2(gy - y, gx - x)
+      let bestA: number | null = null, bs = Infinity
+      for (let i = 0; i < 24; i++) {
+        const a = (i / 24) * Math.PI * 2
+        let edgeAt = -1
+        for (let r = 2; r <= 34; r += 2) {
+          const kk = nav.cell(x + Math.cos(a) * r, y + Math.sin(a) * r)
+          if (kk < 0) break
+          const sv = nav.s[kk]
+          if (sv > z + 1.2) break
+          if (sv < z - 2.5) { edgeAt = r; break }
+        }
+        if (edgeAt < 0) continue
+        const sc = Math.abs(wrap(a - toGoal)) + edgeAt * 0.02
+        if (sc < bs) { bs = sc; bestA = a }
+      }
+      if (bestA !== null) return [Math.cos(bestA), Math.sin(bestA)]
     }
     if (!path || path.length === 0) return [gx - x, gy - y]
     while (wp < path.length - 1 && Math.hypot(path[wp][0] - x, path[wp][1] - y) < 2.5) wp++
