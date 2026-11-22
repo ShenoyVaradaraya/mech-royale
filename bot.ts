@@ -36,7 +36,7 @@ export const DEFAULT_P = {
   edgePref: 0,
   repel: 1,
   cubeCap: 99,
-  restHp: 0.68,
+  restHp: 0.85,
   dropRange: 400,
   losDodge: 1,
   fireDiscipline: 0,
