@@ -26,7 +26,7 @@ export const DEFAULT_P = {
   aimLead: 0.8,
   campHp: 0.0,
   grudgeS: 12,
-  hostileRange: 50,
+  hostileRange: 35,
   aggressive: 0,
   duelMargin: 0.6,
   kiteRange: 68,
