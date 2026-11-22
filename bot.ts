@@ -107,7 +107,7 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
   let tickStart = 0
   const overBudget = () => !noBudget && performance.now() - tickStart > P.budgetMs
   const C = hello.config
-  const R = rng(1)
+  const R = rng(6)
   const me_id = hello.slot
   const tracks = new Map<number, Track>()
   const pickups = new Map<number, Item>()
