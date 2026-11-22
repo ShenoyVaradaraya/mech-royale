@@ -89,23 +89,6 @@ export const DEFAULT_P = {
   trees: 0, // model tree concealment in our own visibility checks (cover, hiding, MRM)
   detailR: 140,
   detailGap: 35,
-  losFirst: 0, // breaking line of sight is the default reflex: duck to cover when hit, never idle in view, hide when 2+ enemies see us
-  losHurtS: 0.8, // seconds after a hit during which we duck instead of trading
-  losHp: 0.92, // duck when hit only below this hp fraction
-  evade: 0, // evasion first: engage only when close, finishing, cornered, or in the final circle; otherwise break line of sight
-  evadeClose: 35, // always fight an enemy with a clear line inside this range
-  evadeRange: 120, // hide from known enemies inside this range even if they have not seen us
-  roofEscape: 0, // when ground cover fails, jump-jet onto a nearby roof hidden from the threats
-  roofR: 45,
-  descend: 0, // when no route exists from a raised spot, walk off the nearest drop-off edge toward the goal instead of standing still
-  gangFight: 0, // when 2+ enemies engage: stay in, focus the fastest kill, fast-strafe with boost, keep attackers in the front arc
-  gangHp: 0.3, // below this hp fraction a gang fight still breaks off
-  gangJump: 0, // chance per decision to hop while gang fighting
-  antiGang: 1, // 1: break line of sight from everyone once a second enemy joins; 2: also never start a fight a second enemy can join
-  bystanderGap: 0, // skip loot/cube/crate goals within this distance of squad members that are not attacking us
-  crowdAvoid: 0, // weight against zone waiting spots near squad members seen in the last 30 s
-  predictS: 0, // hide from where visible enemies will be in this many seconds (their velocity), not just where they are
-  senseThreats: 0, // also hide from enemies we only hear (steps, boost, jets, shots), see as beams, or feel as damage
 }
 export type Params = typeof DEFAULT_P
 
@@ -160,9 +143,6 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
   let mrmPt: number[] | null = null
   let mrmT = -99
   let retreatJinkDir = 1
-  let roof: number[] | null = null
-  let roofT = -99
-  let cornered = false
   let retreatJinkUntil = -99
   let peekT = -99
   let peekTarget = -1
@@ -286,11 +266,6 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
           const d = Math.hypot(px - e.pos[0], py - e.pos[1])
           if (d < 105 && visibleFrom(e.pos[0], e.pos[1], e.pos[2] + 8, px, py, floor, C.mech.height)) score += (105 - d) * 0.65
         }
-        if (P.crowdAvoid > 0) for (const e of tracks.values()) {
-          if (obs.t - e.seen > 30) continue
-          const d = Math.hypot(px - e.pos[0], py - e.pos[1])
-          if (d < 90) score += (90 - d) * 0.3 * P.crowdAvoid
-        }
         for (let step = 0; step < 8; step++) {
           const bearing = step * Math.PI / 4
           const ax = px + Math.cos(bearing) * 28, ay = py + Math.sin(bearing) * 28
@@ -321,26 +296,6 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
       pathGoal = [gx, gy]
       pathT = t
       wp = 0
-    }
-    if (P.descend && distance > 4 && (!path || path.length <= 1)) {
-      // stranded on a raised surface: find an edge we can drop from without first hitting a taller wall
-      const toGoal = Math.atan2(gy - y, gx - x)
-      let bestA: number | null = null, bs = Infinity
-      for (let i = 0; i < 24; i++) {
-        const a = (i / 24) * Math.PI * 2
-        let edgeAt = -1
-        for (let r = 2; r <= 34; r += 2) {
-          const kk = nav.cell(x + Math.cos(a) * r, y + Math.sin(a) * r)
-          if (kk < 0) break
-          const sv = nav.s[kk]
-          if (sv > z + 1.2) break
-          if (sv < z - 2.5) { edgeAt = r; break }
-        }
-        if (edgeAt < 0) continue
-        const sc = Math.abs(wrap(a - toGoal)) + edgeAt * 0.02
-        if (sc < bs) { bs = sc; bestA = a }
-      }
-      if (bestA !== null) return [Math.cos(bestA), Math.sin(bestA)]
     }
     if (!path || path.length === 0) return [gx - x, gy - y]
     while (wp < path.length - 1 && Math.hypot(path[wp][0] - x, path[wp][1] - y) < 2.5) wp++
@@ -421,38 +376,6 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
         if (sc < bs) { bs = sc; best = [px, py] }
       }
       if (best && rad > 20 && (!P.escapeRoute || bs < 25)) break
-    }
-    return best
-  }
-
-  function findRoof(obs: Observation, threats: Track[], x: number, y: number, z: number, h: number, maxR: number): number[] | null {
-    const zc = safeCircle(obs, 8)
-    const climb = (obs.self.energy - 8) / 1.5 + 2.5
-    let best: number[] | null = null
-    let bs = Infinity
-    for (let rad = 6; rad <= maxR; rad += 4) {
-      if (overBudget()) break
-      const n = Math.max(10, Math.round(rad / 2.5))
-      for (let a = 0; a < n; a++) {
-        const ang = (a / n) * Math.PI * 2 + rad * 0.37
-        const px = x + Math.cos(ang) * rad, py = y + Math.sin(ang) * rad
-        const k = nav.cell(px, py)
-        if (k < 0 || !nav.ok[k]) continue
-        const rh = nav.s[k]
-        if (rh - world.ground(px, py) < 5 || rh - z < 4 || rh - z > climb) continue
-        if (!inCircle([px, py], zc, 6)) continue
-        let interior = true
-        for (const [dx, dy] of [[4, 0], [-4, 0], [0, 4], [0, -4]]) {
-          const k2 = nav.cell(px + dx, py + dy)
-          if (k2 < 0 || !nav.ok[k2] || Math.abs(nav.s[k2] - rh) > 1.2) { interior = false; break }
-        }
-        if (!interior) continue
-        let hidden = true
-        for (const e of threats) if (visibleFrom(e.pos[0], e.pos[1], e.pos[2] + 8, px, py, rh, h)) { hidden = false; break }
-        const sc = rad + (hidden ? 0 : 40) + (rh - z) * 0.3
-        if (sc < bs) { bs = sc; best = [px, py, rh] }
-      }
-      if (best && bs < rad) break
     }
     return best
   }
@@ -604,37 +527,8 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
 
       // ---- threat assessment
       const enemies = [...tracks.values()].filter((e) => t - e.seen < 6)
-      // unseen threats located by our other sensors: sounds, beams and damage bearings
-      const sensed: Track[] = []
-      if (P.senseThreats) {
-        const mk = (px: number, py: number, id: number): Track => ({ id, pos: [px, py, z], vel: [0, 0, 0], aim: [Math.atan2(y - py, x - px), 0], hp: 1400, maxHp: 1400,
-          weapons: ["gun"], charging: false, seen: t, vis: false, cubes: 0 })
-        const near = (px: number, py: number) => enemies.some((e) => Math.hypot(e.pos[0] - px, e.pos[1] - py) < 30)
-        let sid = -1000
-        for (const snd of obs.sounds) {
-          if (snd.age > 1.5) continue
-          let r = 0
-          if (snd.kind === "step") r = 30
-          else if (snd.kind === "boost" || snd.kind === "jet") r = snd.dist === "near" ? 45 : 75
-          else if (["gun", "laser", "laser_charge", "lightning", "mortar", "reload"].includes(snd.kind)) r = snd.dist === "near" ? 45 : snd.dist === "mid" ? 110 : 0
-          if (!r) continue
-          const px = x + Math.cos(snd.bearing) * r, py = y + Math.sin(snd.bearing) * r
-          if (!near(px, py)) sensed.push(mk(px, py, sid--))
-        }
-        for (const b of obs.beams ?? []) {
-          if (b.age > 1.5 || !b.path?.length) continue
-          const [px, py] = b.path[0]
-          if (!near(px, py)) sensed.push(mk(px, py, sid--))
-        }
-        for (const d of dmgBearings) {
-          if (t - d.t > 2 || d.by === null || (tracks.get(d.by)?.vis ?? false)) continue
-          const px = x + Math.cos(d.b) * 90, py = y + Math.sin(d.b) * 90
-          if (!near(px, py)) sensed.push(mk(px, py, sid--))
-        }
-      }
       const visible = enemies.filter((e) => e.vis)
       const dist = (e: { pos: number[] }) => Math.hypot(e.pos[0] - x, e.pos[1] - y, e.pos[2] - z)
-      const closingOn = (e: Track) => { const dd = Math.max(1, Math.hypot(x - e.pos[0], y - e.pos[1])); return (e.vel[0] * (x - e.pos[0]) + e.vel[1] * (y - e.pos[1])) / dd }
       const seeingMe = visible.filter((e) => dist(e) < 130 && visibleFrom(e.pos[0], e.pos[1], e.pos[2] + 8, x, y, z, myH))
       const holdingCover = P.hideAtAnchor && mode === "hide" && anchor && me.in_zone && me.grounded &&
         obs.zone.shrink_end === anchorPhase && Math.hypot(anchor[0] - x, anchor[1] - y) < 4 &&
@@ -670,15 +564,9 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
           (!e.weapons.includes("lightning") || d > C.weapons.lightning.range + 12) &&
           !visible.some((other) => other !== e && Math.hypot(other.pos[0] - e.pos[0], other.pos[1] - e.pos[1]) < 80)
         const ghostNow = P.ghost && t > P.ghostT
-        const finalFight = obs.zone.next_radius === 0 && t > obs.zone.shrink_start - 5
-        const evadeWant = (d < P.evadeClose && losOk) || (e.hp < P.finishHp && d < 90 && hpF > 0.5 && losOk) ||
-          (cornered && t - (attackedBy.get(e.id) ?? -99) < 1.5) || (finalFight && hostile)
         const want = ghostNow ? (t - (attackedBy.get(e.id) ?? -99) < 4 || d < P.closeRange) && (losOk || d < 20)
-          : P.evade ? evadeWant
           : holdingCover ? hostile && losOk : hostile || weak || goodOpening || (P.aggressive && hpF > 0.8 && visible.length === 1)
-        const crowded = P.antiGang > 1 && !attackedBy.has(e.id) &&
-          visible.some((o) => o !== e && Math.hypot(o.pos[0] - e.pos[0], o.pos[1] - e.pos[1]) < 80)
-        if (!want || crowded) continue
+        if (!want) continue
         let s = d / 40 + e.hp / 400 + (losOk ? 0 : 4) - (attackedBy.has(e.id) ? 1 : 0)
         if (P.targetPriority && useGuard) {
           const toEnemy = Math.atan2(e.pos[1] - y, e.pos[0] - x)
@@ -727,19 +615,13 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
       const disengage = P.survival >= 3 && target !== null && !winning && me.in_zone &&
         (activeAttackers > 1 || target.weapons.includes("lightning") && lightS < 0 && dist(target) < 52 ||
           P.survival >= 4 && !W[1] && dist(target) < 75 && !recentlyHurt)
-      const fearful = (hpF < P.retreatHp && !winning) || (seeingMe.length >= P.fearCount && hpF < 0.7 && !winning) || (hpF < 0.2 && ttkT > 1.5) || pressured ||
-        (P.losFirst > 0 && seeingMe.length >= 2 && !(winning && ttkT < 2))
+      const fearful = (hpF < P.retreatHp && !winning) || (seeingMe.length >= P.fearCount && hpF < 0.7 && !winning) || (hpF < 0.2 && ttkT > 1.5) || pressured
       const shortRetreat = recoverEarly && target && me.in_zone && hpF < (P.recoverEarly > 1 ? 0.85 : 0.72) &&
         (activeAttackers > 1 && observedDps > 100 || observedDps > 190 && ttdMe < 4.5) && ttkT > Math.min(ttdMe, 2.5)
       if (healing && (hpF >= P.reengageHp || enemies.length === 0 && hpF > 0.7)) healing = false
       if ((fearful || (P.battleRoyale && incoming > 240 && hpF < 0.78 && !winning)) && enemies.length > 0) healing = true
       if (shortRetreat) healing = true
       if (healing && winning && hpF > (P.survival ? 0.5 : 0.25) && !pressured && !shortRetreat) healing = false
-      // gang-up: a second attacker (or two enemies with sight while one fires) means break line of sight from all of them
-      let gangN = 0
-      for (const tt of lastAttack.values()) if (t - tt < 3) gangN++
-      const ganged = P.antiGang > 0 && enemies.length > 0 && (gangN >= 2 || (seeingMe.length >= 2 && gangN >= 1))
-      if (ganged) healing = true
       // finishing a weak close target overrides retreat
       const finish = target && target.hp < P.finishHp && dist(target) < 120 && hpF > 0.15 &&
         (!P.survival || ttdMe > Math.max(1.5, ttkT * 2) && activeAttackers < 3)
@@ -747,23 +629,6 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
       const laserAvoid = P.laserCounter > 0 && laserS < 0 && lightS < 0 && visible.some((e) => e.weapons.includes("laser") && e.hp > 300 &&
         dist(e) > 45 && dist(e) < 280 && seeingMe.includes(e) && !(target && target.id === e.id && target.hp < P.finishHp))
       mode = shortRetreat || (healing || disengage || laserAvoid) && !finish ? "retreat" : target ? "fight" : "loot"
-      if (ganged && !(finish && ttkT < 1.5)) mode = "retreat"
-      // aggressive answer to a gang-up: stay in and fight while moving hard
-      const gangFighting = P.gangFight > 0 && target !== null && (gangN >= 2 || seeingMe.length >= 2) && hpF > P.gangHp
-      if (gangFighting) {
-        healing = false
-        mode = "fight"
-        // focus the attacker we can remove fastest
-        let best: Track | null = null, bs = Infinity
-        for (const e of visible) {
-          if (!attackedBy.has(e.id) && !seeingMe.includes(e) && e !== target) continue
-          if (!world.los(x, y, muzZ, e.pos[0], e.pos[1], e.pos[2] + 4.5, 1.0)) continue
-          const sw = Math.abs(wrap(me.aim[0] - Math.atan2(e.pos[1] - y, e.pos[0] - x))) / (me.stats.turn_rate ?? C.mech.turn_rate)
-          const sc = e.hp / Math.max(35, dpsOf(myW, dist(e), me.cubes)) + sw
-          if (sc < bs) { bs = sc; best = e }
-        }
-        if (best) target = best
-      }
       // can't outrun a chaser that keeps hitting us: fleeing only gives it free shots, so fight back
       if (P.standFight && mode === "retreat" && target && !finish && hpF > 0.12 && me.energy < P.standEnergy &&
           t - lastDamagedT < 0.8 && dist(target) < P.standR && attackedBy.has(target.id) &&
@@ -773,8 +638,6 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
       const npcAngry = [...npcAttack.values()].some((tt) => t - tt < 4)
       if (mode === "loot" && !npcAngry && t - lastDamagedT > 2 && hpF < P.restHp && inCircle([x, y], safeCircle(obs, 10), P.zoneMargin * 0.5)) mode = "rest"
       if (holdingCover && !npcAngry && (mode === "loot" || mode === "rest")) mode = "hide"
-      // line of sight first: never stand in an enemy's view while doing anything else
-      if (P.losFirst > 0 && !npcAngry && (mode === "loot" || mode === "rest" || mode === "hide") && seeingMe.length > 0) mode = "retreat"
       if (!me.in_zone && obs.zone.dps * 3 > me.hp * 0.5) mode = "zone"
       if (P.safePlay) {
         const next = safeCircle(obs, 6)
@@ -786,10 +649,6 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
       const finalDistance = Math.hypot(x - obs.zone.next_center[0], y - obs.zone.next_center[1])
       const finalTravelTime = finalDistance / (me.stats.walk_speed ?? C.mech.walk_speed)
       const headingToFinal = P.zoneAnchor && obs.zone.next_radius === 0 && t + finalTravelTime * 1.35 + 8 >= obs.zone.shrink_start
-      if (P.evade && mode !== "fight" && mode !== "zone" &&
-          (enemies.some((e) => e.vis && (seeingMe.includes(e) || dist(e) < P.evadeRange * (P.predictS > 0 && closingOn(e) > 4 ? 1.3 : 1)) || !e.vis && dist(e) < P.evadeRange * 0.6) ||
-           sensed.some((e) => dist(e) < P.evadeRange))) mode = "retreat"
-      if (mode !== "retreat") roof = null
       if (headingToFinal) mode = "zone"
 
       // ---- movement goal
@@ -807,19 +666,7 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
 
       if (mode === "retreat") {
         const attackers = recoverEarly ? enemies.filter((e) => attackedBy.has(e.id) || seeingMe.includes(e) || e === target) : []
-        let threats = (attackers.length ? attackers : enemies).concat(P.evade ? sensed : [])
-        if (P.predictS > 0) {
-          // motion cues: also hide from each moving enemy's position a moment from now
-          const ahead: Track[] = []
-          for (const e of threats) {
-            if (!e.vis || Math.hypot(e.vel[0], e.vel[1]) < 2) continue
-            let px = e.pos[0] + e.vel[0] * P.predictS, py = e.pos[1] + e.vel[1] * P.predictS
-            const k = nav.cell(px, py)
-            if (k < 0 || !nav.ok[k]) { px = e.pos[0] + e.vel[0] * P.predictS * 0.5; py = e.pos[1] + e.vel[1] * P.predictS * 0.5 }
-            ahead.push({ ...e, id: e.id - 2000, pos: [px, py, e.pos[2]] })
-          }
-          threats = threats.concat(ahead)
-        }
+        const threats = attackers.length ? attackers : enemies
         const concealed = P.safePlay && !seeingMe.length && inCircle([x, y], sc, 6) &&
           threats.every((e) => !visibleFrom(e.pos[0], e.pos[1], e.pos[2] + 8, x, y, z, myH))
         if (concealed) {
@@ -846,23 +693,6 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
           mv = goTo(obs, g[0], g[1], x, y, z)
           boost = me.energy > 15
         }
-        // escape onto a roof when the ground offers no cover or we are still being hit in the open
-        const exposedHurt = t - lastDamagedT < 1.0 && seeingMe.length > 0
-        if (P.roofEscape && (!cover || exposedHurt) && me.energy > 25) {
-          if (!roof || t - roofT > 2.5) { roof = findRoof(obs, threats, x, y, z, myH, P.roofR); roofT = t }
-        }
-        if (roof) {
-          const dxr = roof[0] - x, dyr = roof[1] - y, dr = Math.hypot(dxr, dyr)
-          if (z < roof[2] - 0.6) {
-            mv = [dxr, dyr]
-            if (dr < 24) { if (me.grounded) jump = true; else boost = me.energy > 1 }
-          } else if (Math.abs(z - roof[2]) < 1.6) {
-            mv = dr > 2 ? [dxr, dyr] : [0, 0]
-            boost = false
-            cover = [x, y]; coverT = t
-          } else roof = null
-        }
-        cornered = !cover && !roof && t - lastDamagedT < 1.5
         // face nearest threat to keep front armor toward it
         let ne: Track | null = null
         for (const e of threats) if (!ne || dist(e) < dist(ne)) ne = e
@@ -926,8 +756,8 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
         const shortCircuit = P.laserCounter > 0 && lightS >= 0 && laserS < 0 && target.weapons.includes("laser") && me.energy > 15
         if (shortCircuit) pref = Math.min(pref, C.weapons.lightning.range * 0.6)
         if (t > strafeUntil) {
-          strafeDir = gangFighting ? (R() < 0.9 ? -strafeDir : strafeDir) : R() < 0.5 ? -1 : 1
-          strafeUntil = t + (gangFighting ? 0.25 + R() * 0.35 : P.strafeMin + R() * (P.strafeMax - P.strafeMin))
+          strafeDir = R() < 0.5 ? -1 : 1
+          strafeUntil = t + P.strafeMin + R() * (P.strafeMax - P.strafeMin)
         }
         let radial = d > pref * 1.25 ? 1 : d < pref * 0.7 ? -0.8 : 0
         if (P.rangeControl) radial = Math.max(-2.8, Math.min(0.9, (d - pref) / 18))
@@ -939,21 +769,6 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
         if (escapingArc) radial = d < enemyArc + 5 ? -3 : -1.8
         const lateral = escapingArc && d < enemyArc + 5 ? 0.45 : P.rangeControl && d < pref - 24 ? 0.7 : 1
         mv = [Math.cos(perp) * lateral + Math.cos(toT) * radial, Math.sin(perp) * lateral + Math.sin(toT) * radial]
-        // gang fight: keep every attacker inside the front arc (rear hits deal x1.5)
-        if (gangFighting) {
-          const att = visible.filter((e) => attackedBy.has(e.id) || seeingMe.includes(e))
-          if (att.length >= 2) {
-            const ang = att.map((e) => Math.atan2(e.pos[1] - y, e.pos[0] - x)).sort((p, q) => p - q)
-            let gap = ang[0] + 2 * Math.PI - ang[ang.length - 1]
-            for (let k = 1; k < ang.length; k++) gap = Math.max(gap, ang[k] - ang[k - 1])
-            if (2 * Math.PI - gap > 2.1) {
-              let cx = 0, cy = 0
-              for (const e of att) { cx += e.pos[0] / att.length; cy += e.pos[1] / att.length }
-              const away = Math.atan2(y - cy, x - cx)
-              mv = [mv[0] + Math.cos(away) * 1.2, mv[1] + Math.sin(away) * 1.2]
-            }
-          }
-        }
         // drift away from uninvolved mechs so they don't join
         if (P.thirdRepel) for (const e of bystanders) {
           const dd = Math.hypot(e.pos[0] - x, e.pos[1] - y)
@@ -1028,8 +843,7 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
           const laserReady = laserS >= 0 && W[laserS]!.cooldown <= 0.3
           const lightReady = lightS >= 0 && d < 45 && me.energy > 10
           const holdPeek = P.peekHold && useGuard
-          const hurtPeek = P.losFirst > 0 && t - lastDamagedT < P.losHurtS && hpF < P.losHp && target.hp >= P.finishHp && !lightReady
-          if ((reloading && !laserReady && !lightReady || hurtPeek) && (losT || holdPeek && peekTarget === target.id)) {
+          if (reloading && !laserReady && !lightReady && (losT || holdPeek && peekTarget === target.id)) {
             if (!peekCover || t - peekT > 1.0 && (!holdPeek || losT) || holdPeek && peekTarget !== target.id) {
               peekCover = findCover(obs, [target], x, y, z, myH, P.peekR)
               peekT = t
@@ -1044,10 +858,6 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
         // dodge lasers: any enemy charging aimed at us
         const danger = visible.some((e) => e.charging && Math.abs(wrap(e.aim[0] - Math.atan2(y - e.pos[1], x - e.pos[0]))) < 0.25)
         boost = !!P.boostDodge && (danger || recentlyHurt) && me.energy > (lightS >= 0 ? 35 : 20)
-        if (gangFighting) {
-          boost = me.grounded && me.energy > (lightS >= 0 ? 40 : 30)
-          if (P.gangJump > 0 && me.grounded && R() < P.gangJump) jump = true
-        }
         if (danger && P.losDodge) {
           const ch = visible.filter((e) => e.charging && Math.abs(wrap(e.aim[0] - Math.atan2(y - e.pos[1], x - e.pos[0]))) < 0.25)
           const reach = me.energy > 15 ? 9 : 5.5
@@ -1086,12 +896,6 @@ export function makeBot(hello: Hello, world: World, nav: Nav, params?: Partial<P
         let gscore = Infinity
         const considerGoal = (p: number[], value: number, crate: Item | null = null, drone: Track | null = null) => {
           if (!inCircle(p, gc, P.zoneMargin * 0.5)) return
-          if (P.bystanderGap > 0) {
-            for (const e of tracks.values()) {
-              if (t - e.seen > 10 || attackedBy.has(e.id)) continue
-              if (Math.hypot(p[0] - e.pos[0], p[1] - e.pos[1]) < P.bystanderGap) return
-            }
-          }
           const d = Math.hypot(p[0] - x, p[1] - y)
           const s = d / value
           if (s < gscore) { gscore = s; goal = p; lootCrate = crate; lootDrone = drone }
