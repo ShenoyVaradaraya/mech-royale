@@ -6,7 +6,7 @@ import { ballisticPitch, intercept, rng, wrap } from "./geom.ts"
 
 export const DEFAULT_P = {
   retreatHp: 0.42, // retreat to cover below this hp fraction
-  reengageHp: 0.85, // leave cover after healing to this
+  reengageHp: 0.95, // leave cover after healing to this
   fightRange: 105, // preferred distance with gun/laser
   lightRange: 28, // preferred distance with lightning
   zoneMargin: 18,
